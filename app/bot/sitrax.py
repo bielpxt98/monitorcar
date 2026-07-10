@@ -714,111 +714,105 @@ class SitraxBot:
 
     def open_vehicle_selector(self) -> None:
         """
-        Clica no chip/botão 'Veículo' da barra de filtros
-        (NÃO clicar em 'Data' — erro comum).
+        Clica no chip 'Veículo' da barra de filtros (não em Data).
+        No headless usa JS (is_displayed() falha com frequência no Railway).
         """
         d = self._d()
-        self._sleep(0.5)
+        self._sleep(0.8)
         self._close_date_popup_if_open()
 
+        # 1) Clique via JavaScript no DOM inteiro (inclui nós "invisíveis" ao Selenium)
         clicked = False
-        target = None
+        try:
+            result = d.execute_script(
+                """
+                function norm(s) {
+                  return (s || '').replace(/\\s+/g, ' ').trim();
+                }
+                var nodes = document.querySelectorAll('a,button,span,div,label,li,p');
+                var candidates = [];
+                for (var i = 0; i < nodes.length; i++) {
+                  var el = nodes[i];
+                  // ignora menu lateral
+                  if (el.closest && (el.closest('#sidebar-menu') || el.closest('#sidebar'))) continue;
+                  var t = norm(el.innerText || el.textContent);
+                  if (!t) continue;
+                  // só o chip "Veículo" / "Veiculo" (ou "Veículo: XXX" curto)
+                  if (t === 'Veículo' || t === 'Veiculo' ||
+                      /^Ve[ií]culo\\s*:/.test(t) ||
+                      (t.indexOf('Veículo') === 0 && t.length <= 24) ||
+                      (t.indexOf('Veiculo') === 0 && t.length <= 24)) {
+                    // evita blocos enormes
+                    var r = el.getBoundingClientRect();
+                    if (r.height > 100 || r.width > 500) continue;
+                    // evita clicar em "Data"
+                    if (/^Data/i.test(t) || t.indexOf('Data:') === 0) continue;
+                    candidates.push({el: el, t: t, w: r.width || 9999});
+                  }
+                }
+                // prefere o menor (chip da barra)
+                candidates.sort(function(a,b){ return a.w - b.w; });
+                if (candidates.length) {
+                  var c = candidates[0].el;
+                  c.scrollIntoView({block:'center'});
+                  c.click();
+                  return candidates[0].t;
+                }
+                return null;
+                """
+            )
+            if result:
+                clicked = True
+                logger.info("Clicou em Veículo via JS: %s", result)
+        except Exception as e:
+            logger.warning("JS clique Veículo: %s", e)
 
-        # 1) Texto EXATO "Veículo" / "Veiculo" (elemento pequeno, não o bloco inteiro da barra)
-        exact_xpaths = [
-            "//*[normalize-space()='Veículo' or normalize-space()='Veiculo']",
-            "//span[normalize-space()='Veículo' or normalize-space()='Veiculo']",
-            "//a[normalize-space()='Veículo' or normalize-space()='Veiculo']",
-            "//button[normalize-space()='Veículo' or normalize-space()='Veiculo']",
-            "//label[normalize-space()='Veículo' or normalize-space()='Veiculo']",
-        ]
-        end = time.time() + 15
-        while time.time() < end and not target:
-            for xp in exact_xpaths:
-                for el in d.find_elements(By.XPATH, xp):
-                    try:
-                        if not el.is_displayed():
-                            continue
-                        txt = (el.text or "").strip()
-                        # rejeita se o texto do elemento tiver "Data" (bloco errado)
-                        if "data" in txt.lower() and "veíc" not in txt.lower() and "veic" not in txt.lower():
-                            continue
-                        if txt in ("Veículo", "Veiculo") or txt.startswith("Veículo") or txt.startswith("Veiculo"):
-                            # se o nó for só "Veículo", perfeito
-                            if txt in ("Veículo", "Veiculo"):
-                                target = el
-                                break
-                    except StaleElementReferenceException:
-                        continue
-                if target:
-                    break
-            if not target:
-                time.sleep(0.3)
-
-        # 2) Fallback: qualquer elemento visível cujo texto limpo seja só Veículo
-        if not target:
-            for el in d.find_elements(By.XPATH, "//a|//button|//span|//div|//label"):
+        # 2) Fallback Selenium clássico
+        if not clicked:
+            for el in d.find_elements(By.XPATH, "//*[contains(text(),'Veículo') or contains(text(),'Veiculo')]"):
                 try:
-                    if not el.is_displayed():
+                    t = (el.text or "").strip()
+                    if not t or t.startswith("Data"):
                         continue
-                    txt = (el.text or "").strip()
-                    if txt not in ("Veículo", "Veiculo"):
+                    if "Veículo" not in t and "Veiculo" not in t:
                         continue
-                    # evita divs gigantes
-                    h = el.size.get("height", 0) or 0
-                    w = el.size.get("width", 0) or 0
-                    if h > 80 or w > 400:
+                    if len(t) > 30:
                         continue
-                    target = el
+                    d.execute_script("arguments[0].click();", el)
+                    clicked = True
+                    logger.info("Clicou Veículo fallback: %s", t)
                     break
                 except Exception:
                     continue
 
-        if target is not None:
-            # clica no centro do elemento "Veículo" via JS (mais preciso)
-            try:
-                d.execute_script(
-                    "arguments[0].scrollIntoView({block:'center'});"
-                    "arguments[0].click();",
-                    target,
-                )
-                clicked = True
-                logger.info("Clicou em Veículo (texto exato)")
-            except Exception:
-                try:
-                    self._click(target)
-                    clicked = True
-                except Exception as e:
-                    logger.warning("Falha no clique Veículo: %s", e)
-
         if not clicked:
             self._save_debug("veiculo_botao_nao_encontrado")
             raise TimeoutException(
-                "Não encontrou o botão exato 'Veículo' (sem clicar em Data). "
+                "Não encontrou o botão 'Veículo' na barra de filtros. "
                 f"Veja {DEBUG_DIR}"
             )
 
-        self._wait_loader_gone(20)
-        self._sleep(0.8)
+        self._wait_loader_gone(25)
+        self._sleep(1.0)
 
-        # modal "Selecione Veículo"
-        try:
-            self._find_first(
-                [
-                    (By.XPATH, "//*[contains(normalize-space(.), 'Selecione Veículo') or contains(normalize-space(.), 'Selecione Veiculo')]"),
-                    (By.XPATH, "//th[normalize-space()='Placa' or contains(normalize-space(.),'Placa')]"),
-                ],
-                timeout=15,
-            )
-        except TimeoutException:
+        # modal "Selecione Veículo" ou input de placa do modal
+        end = time.time() + 20
+        modal_ok = False
+        while time.time() < end:
+            blob = self._norm(self._page_blob())
+            if "selecione veiculo" in blob or "formmodalsearchveiculo" in blob:
+                modal_ok = True
+                break
+            if d.find_elements(By.CSS_SELECTOR, "#itFiltroCveiPlaca, input[id='formModalSearchVeiculo:itCveiPlaca']"):
+                modal_ok = True
+                break
+            self._sleep(0.4)
+
+        if not modal_ok:
             self._save_debug("veiculo_modal_nao_abriu")
-            # se abriu filtro de data por engano, avisa
-            body = d.find_element(By.TAG_NAME, "body").text
-            if "Filtro Data" in body or "Filtro data" in body:
-                raise TimeoutException(
-                    "Abriu o filtro de DATA em vez de VEÍCULO. "
-                    f"Veja {DEBUG_DIR}"
-                )
+            blob = self._page_blob()
+            if "Filtro Data" in blob:
+                raise TimeoutException("Abriu filtro de DATA em vez de VEÍCULO.")
             raise TimeoutException(
                 "Clicou em Veículo mas o modal não abriu. "
                 f"Veja {DEBUG_DIR}"
@@ -1477,31 +1471,68 @@ class SitraxBot:
         before = {p.name for p in dest.glob("*.pdf")}
         self._prepare_historico_filtrado(placa, data_ini, data_fim)
 
-        # botão download (nuvem roxa ao lado de Filtrar)
+        # botão download (nuvem roxa ao lado de Filtrar) — via JS no headless
         clicked = False
-        for sel in [
-            (By.CSS_SELECTOR, "i.fa-cloud-arrow-down, i.fa-cloud-download-alt, i.fa-download"),
-            (By.XPATH, "//*[contains(@class,'fa-cloud') or contains(@class,'download') or contains(@class,'Download')]"),
-            (By.XPATH, "//button[contains(@title,'Download') or contains(@title,'export') or contains(@title,'Export')]"),
-            (By.XPATH, "//a[contains(@title,'Download') or contains(@onclick,'export') or contains(@onclick,'Export')]"),
-            (By.CSS_SELECTOR, "[onclick*='export' i], [onclick*='Export'], [onclick*='download' i]"),
-        ]:
-            try:
-                els = self._d().find_elements(*sel)
-            except Exception:
-                continue
-            for el in els:
+        try:
+            res = self._d().execute_script(
+                """
+                // ícones de nuvem / download
+                var sels = [
+                  'i.fa-cloud-arrow-down', 'i.fa-cloud-download', 'i.fa-cloud-download-alt',
+                  'i.fa-download', 'i[class*="cloud"]', 'i[class*="download"]',
+                  '[onclick*="export"]', '[onclick*="Export"]', '[onclick*="download"]',
+                  '[onclick*="Download"]', '[title*="Download"]', '[title*="export"]'
+                ];
+                for (var s = 0; s < sels.length; s++) {
+                  var nodes = document.querySelectorAll(sels[s]);
+                  for (var i = 0; i < nodes.length; i++) {
+                    var el = nodes[i];
+                    if (el.closest && el.closest('#sidebar-menu')) continue;
+                    var r = el.getBoundingClientRect();
+                    if (r.width < 1 && r.height < 1) continue;
+                    el.scrollIntoView({block:'center'});
+                    el.click();
+                    return sels[s];
+                  }
+                }
+                // botão/link roxo ao lado de Filtrar
+                var all = document.querySelectorAll('button,a,div,span,i');
+                for (var j = 0; j < all.length; j++) {
+                  var e = all[j];
+                  var cls = (e.className || '') + '';
+                  var oc = e.getAttribute('onclick') || '';
+                  if (/cloud|download|export/i.test(cls + ' ' + oc)) {
+                    if (e.closest && e.closest('#sidebar-menu')) continue;
+                    e.click();
+                    return 'heuristic';
+                  }
+                }
+                return null;
+                """
+            )
+            if res:
+                clicked = True
+                logger.info("Clicou download via JS: %s", res)
+        except Exception as e:
+            logger.warning("JS download: %s", e)
+
+        if not clicked:
+            for sel in [
+                (By.CSS_SELECTOR, "i.fa-cloud-arrow-down, i.fa-cloud-download-alt, i.fa-download, i[class*='cloud']"),
+                (By.CSS_SELECTOR, "[onclick*='export'], [onclick*='Export'], [onclick*='download']"),
+            ]:
                 try:
-                    if not el.is_displayed():
-                        continue
-                    self._click(el)
-                    clicked = True
-                    logger.info("Clicou no botão de download do histórico")
-                    break
+                    for el in self._d().find_elements(*sel):
+                        try:
+                            self._d().execute_script("arguments[0].click();", el)
+                            clicked = True
+                            break
+                        except Exception:
+                            continue
                 except Exception:
                     continue
-            if clicked:
-                break
+                if clicked:
+                    break
 
         if not clicked:
             self._save_debug("download_nao_encontrado")

@@ -122,27 +122,30 @@ def generate_vehicle_report_cloud(
         data_ref += f" a {data_fim.strftime('%d/%m/%Y')}"
 
     with TempWorkspace(prefix=f"sitrax_{placa}_") as tmp:
-        # Chrome baixa PDFs brutos só dentro de tmp
+        # Chrome baixa PDF BRUTO só em tmp (nunca no celular)
         with SitraxBot(headless=headless, download_dir=tmp) as bot:
             bot.login()
-            # tenta fluxo com download de PDF do Sitrax; se falhar, usa scrape da tabela
+            # Caminho principal: baixar PDF do Sitrax (mesmo do botão nuvem)
+            # → parse → resumo. Fallback: scrape da tabela se download falhar.
+            pdf_bruto = None
             try:
                 pdf_bruto = bot.download_historico_pdf(
                     placa, data_ini=data_ini, data_fim=data_fim, dest_dir=tmp
                 )
-                if pdf_bruto and Path(pdf_bruto).exists():
-                    result = report_from_sitrax_pdf(
-                        pdf_bruto, placa=placa, data_ref=data_ref
-                    )
-                else:
-                    raise RuntimeError("PDF bruto não baixado")
             except Exception as e:
-                logger.warning("Fallback scrape tabela: %s", e)
+                logger.warning("Download PDF Sitrax falhou: %s", e)
+
+            if pdf_bruto and Path(pdf_bruto).exists():
+                logger.info("Usando PDF baixado: %s (%s bytes)", pdf_bruto, Path(pdf_bruto).stat().st_size)
+                result = report_from_sitrax_pdf(
+                    pdf_bruto, placa=placa, data_ref=data_ref
+                )
+            else:
+                logger.warning("Sem PDF bruto; tentando scrape da tabela")
                 positions = bot.get_positions_for_plate(
-                    placa, data_ini=data_ini, data_fim=data_fim
+                    placa, data_ini=data_ini, data_fim=data_fim, already_on_posicoes=False
                 )
                 result = report_from_positions(placa, positions, data_ref=data_ref)
 
-        # ao sair do with TempWorkspace, tmp (e PDF bruto) são apagados
-        # pdf_bytes do resumo já está em memória
+        # tmp (e PDF bruto) APAGADOS aqui — só result.pdf_bytes (resumo) sai
         return result
