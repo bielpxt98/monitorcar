@@ -147,25 +147,32 @@ def _run_job(modo: str, placa: str, d_ini: date, d_fim: date):
                         "Tente 1 placa ou use o upload de PDF."
                     )
 
+                # remove nomes inválidos; processa 1 placa por vez (Sitrax não tem "selecionar todos")
+                vehicles = [
+                    v
+                    for v in vehicles
+                    if v.get("placa")
+                    and v["placa"].upper() not in ("TODOS", "TODAS", "ALL", "FROTA")
+                ]
                 debug_session.step(
                     "frota_lista",
-                    f"{len(vehicles)} veículo(s): "
-                    + ", ".join(v["placa"] for v in vehicles[:20]),
+                    f"Frota: {len(vehicles)} veículo(s) — processando 1 a 1: "
+                    + ", ".join(v["placa"] for v in vehicles[:25]),
                     ok=True,
                     screenshot=False,
                 )
 
                 for i, v in enumerate(vehicles):
                     pl = v["placa"]
-                    if pl in ("TODOS", "TODAS", "ALL", "FROTA"):
-                        continue
                     debug_session.step(
-                        f"frota_{i+1}_{pl}",
-                        f"Processando {i+1}/{len(vehicles)}: {pl}",
+                        f"frota_{i+1}_de_{len(vehicles)}_{pl}",
+                        f"1 a 1 → ({i+1}/{len(vehicles)}) placa {pl}: "
+                        "Vehicle → Select → Filter → Export PDF → resumo",
                         ok=True,
                         screenshot=False,
                     )
                     try:
+                        # cada ciclo reabre o fluxo completo no Sitrax (1 placa)
                         pdf_bruto = None
                         try:
                             pdf_bruto = bot.download_historico_pdf(
@@ -176,9 +183,21 @@ def _run_job(modo: str, placa: str, d_ini: date, d_fim: date):
 
                         if pdf_bruto and Path(pdf_bruto).exists():
                             _, positions = positions_from_pdf(pdf_bruto)
+                            debug_session.step(
+                                f"frota_pdf_ok_{pl}",
+                                f"{pl}: PDF baixado ({Path(pdf_bruto).stat().st_size} bytes)",
+                                ok=True,
+                                screenshot=False,
+                            )
                         else:
                             positions = bot.get_positions_for_plate(
                                 pl, data_ini=d_ini, data_fim=d_fim
+                            )
+                            debug_session.step(
+                                f"frota_scrape_{pl}",
+                                f"{pl}: sem PDF, usou scrape da tabela",
+                                ok=True,
+                                screenshot=False,
                             )
 
                         total_pontos += len([p for p in positions if p.when])

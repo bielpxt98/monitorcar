@@ -116,14 +116,16 @@
           <label class="mode" style="display:block;border:1px solid var(--border);border-radius:12px;padding:.75rem;cursor:pointer">
             <input type="radio" name="modo" value="placa" {% if not modo or modo == 'placa' %}checked{% endif %} />
             <strong>1 veículo</strong>
+            <span style="display:block;font-size:.72rem;color:var(--muted);margin-top:.25rem">Só a placa abaixo</span>
           </label>
           <label class="mode" style="display:block;border:1px solid var(--border);border-radius:12px;padding:.75rem;cursor:pointer">
             <input type="radio" name="modo" value="todos" {% if modo == 'todos' %}checked{% endif %} />
-            <strong>Todos</strong>
+            <strong>Todos (1 a 1)</strong>
+            <span style="display:block;font-size:.72rem;color:var(--muted);margin-top:.25rem">Cada carro separado</span>
           </label>
         </div>
 
-        <label for="placa">Placa (obrigatória se for <strong>1 veículo</strong>; deixe vazio em Todos)</label>
+        <label for="placa">Placa (obrigatória em <strong>1 veículo</strong>; ignore em Todos)</label>
         <input id="placa" name="placa" type="text" placeholder="Ex: PCE7B03"
                value="{{ placa or '' }}" style="text-transform:uppercase"
                autocomplete="off" />
@@ -140,9 +142,9 @@
         </div>
         <button type="submit" class="btn-primary" id="btn-auto">Gerar resumo automático</button>
         <p class="hint">
-          <strong>1 veículo:</strong> 1 PDF de resumo dessa placa.<br/>
-          <strong>Todos:</strong> o servidor percorre a frota e monta <strong>1 PDF único</strong> com o resumo de cada carro (pode demorar vários minutos).
-          O relatório aparece nesta mesma tela para você baixar — não vai por e-mail nem WhatsApp.
+          No Sitrax <strong>não dá para marcar todos de uma vez</strong> — o robô faz <strong>1 por 1</strong>:<br/>
+          abre a lista → escolhe a placa → Filter → nuvem → PDF → resumo → próximo carro…<br/>
+          No final você recebe <strong>1 PDF</strong> com o resumo de todos, nesta mesma tela (baixar).
         </p>
       </form>
       <p class="hint">
