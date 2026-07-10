@@ -18,21 +18,72 @@
       --border: #2d3548;
     }
     * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+    html {
+      min-height: 100%;
+      background: var(--bg);
+    }
     body {
       margin: 0;
       font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
       color: var(--text);
       min-height: 100vh;
+      min-height: 100dvh;
       padding: 1rem;
       padding-bottom: 2.5rem;
+      /* fundo sólido de fallback se a imagem falhar */
       background-color: var(--bg);
-      background-image:
-        linear-gradient(180deg, rgba(15,18,33,.72) 0%, rgba(15,18,33,.88) 55%, rgba(15,18,33,.94) 100%),
-        url("/static/bg-hero.jpg");
+      /* NÃO use background-attachment:fixed — quebra no iOS/WhatsApp WebView */
+      position: relative;
+      isolation: isolate;
+    }
+    /* Camada de fundo fixa (funciona em celular / iPhone / Chrome Android) */
+    body::before {
+      content: "";
+      position: fixed;
+      inset: 0;
+      z-index: -2;
+      background-color: var(--bg);
+      background-image: url("/static/bg-hero.jpg");
       background-size: cover;
-      background-position: center top;
+      background-position: center 18%;
       background-repeat: no-repeat;
-      background-attachment: fixed;
+      /* evita “pulo” no iOS ao rolar */
+      -webkit-transform: translateZ(0);
+      transform: translateZ(0);
+    }
+    /* véu escuro por cima da foto — mais leve no topo p/ ver as pessoas */
+    body::after {
+      content: "";
+      position: fixed;
+      inset: 0;
+      z-index: -1;
+      pointer-events: none;
+      background: linear-gradient(
+        180deg,
+        rgba(15, 18, 33, 0.45) 0%,
+        rgba(15, 18, 33, 0.62) 35%,
+        rgba(15, 18, 33, 0.82) 70%,
+        rgba(15, 18, 33, 0.92) 100%
+      );
+    }
+    @media (max-width: 640px) {
+      body::before {
+        /* no celular mostra mais o rosto/meio da arte */
+        background-position: center 22%;
+        background-size: cover;
+      }
+      body::after {
+        background: linear-gradient(
+          180deg,
+          rgba(15, 18, 33, 0.38) 0%,
+          rgba(15, 18, 33, 0.55) 40%,
+          rgba(15, 18, 33, 0.78) 75%,
+          rgba(15, 18, 33, 0.90) 100%
+        );
+      }
+      .card {
+        background: rgba(26, 31, 53, 0.82);
+      }
     }
     .wrap { max-width: 480px; margin: 0 auto; position: relative; z-index: 1; }
     header { margin-bottom: 1.25rem; }
