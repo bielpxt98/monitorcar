@@ -15,7 +15,7 @@ from datetime import date, datetime
 from pathlib import Path
 from typing import Optional
 
-from fastapi import FastAPI, Form, Request
+from fastapi import FastAPI, File, Form, Request, UploadFile
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
@@ -165,9 +165,102 @@ def _run_job(modo: str, placa: str, d_ini: date, d_fim: date):
 
 
 @app.get("/gerar")
+@app.get("/gerar-pdf")
 async def gerar_get():
-    """Refresh/bookmark em /gerar → volta para a home (só POST gera relatório)."""
+    """Refresh/bookmark → volta para a home."""
     return RedirectResponse(url="/", status_code=303)
+
+
+@app.post("/gerar-pdf", response_class=HTMLResponse)
+async def gerar_pdf(
+    request: Request,
+    pdf: UploadFile = File(...),
+    placa: str = Form(""),
+    data: str = Form(""),
+):
+    """
+    Caminho confiável na nuvem:
+      - usuário envia o PDF baixado do Sitrax
+      - servidor parseia em pasta TEMP
+      - gera 1 PDF-resumo
+      - apaga o bruto
+    """
+    import asyncio
+    import tempfile
+    import shutil
+    from pathlib import Path as P
+
+    error = None
+    texto = None
+    has_pdf = False
+    pdf_name = None
+
+    name = (pdf.filename or "").lower()
+    if not name.endswith(".pdf"):
+        error = "Envie um arquivo .pdf (histórico do Sitrax)."
+    else:
+        d_ref = parse_date(data)
+        data_ref = d_ref.strftime("%d/%m/%Y") if d_ref else date.today().strftime("%d/%m/%Y")
+
+        def _job():
+            from app.bot.pipeline import TempWorkspace, report_from_sitrax_pdf
+
+            with TempWorkspace(prefix="upload_") as tmp:
+                bruto = tmp / "sitrax_upload.pdf"
+                content = pdf.file.read()  # may not work in thread - read outside
+                return content, tmp, bruto, data_ref
+
+        # lê bytes no event loop, processa em thread com temp
+        try:
+            raw = await pdf.read()
+            if len(raw) < 500:
+                raise ValueError("Arquivo PDF muito pequeno ou vazio.")
+
+            def process():
+                from app.bot.pipeline import TempWorkspace, report_from_sitrax_pdf
+
+                with TempWorkspace(prefix="upload_") as tmp:
+                    bruto = tmp / "sitrax_upload.pdf"
+                    bruto.write_bytes(raw)
+                    result = report_from_sitrax_pdf(
+                        bruto,
+                        placa=placa.strip() or None,
+                        data_ref=data_ref,
+                    )
+                    # ao sair do with, bruto é apagado
+                    return result
+
+            loop = asyncio.get_event_loop()
+            result = await loop.run_in_executor(executor, process)
+            _LAST_REPORT.clear()
+            _LAST_REPORT.update(
+                {
+                    "pdf_bytes": result.pdf_bytes,
+                    "pdf_filename": result.pdf_filename,
+                    "texto": result.texto,
+                    "placa": result.placa,
+                }
+            )
+            texto = result.texto
+            has_pdf = True
+            pdf_name = result.pdf_filename
+        except Exception as e:
+            logger.exception("Erro no upload PDF")
+            error = f"{type(e).__name__}: {e}"
+
+    return templates.TemplateResponse(
+        request,
+        "index.html",
+        {
+            "configured": sitrax_configured(),
+            "today": date.today().isoformat(),
+            "error": error,
+            "texto": texto,
+            "has_pdf": has_pdf,
+            "pdf_name": pdf_name,
+            "placa": placa,
+        },
+    )
 
 
 @app.post("/gerar", response_class=HTMLResponse)

@@ -40,28 +40,20 @@
       padding: 1.15rem;
       margin-bottom: 1rem;
     }
+    .card h2 { margin: 0 0 .75rem; font-size: 1rem; }
     .badge {
       display: inline-flex; align-items: center; gap: .35rem;
       font-size: .75rem; padding: .2rem .6rem; border-radius: 999px; margin-bottom: .85rem;
     }
     .badge.ok { background: rgba(34,197,94,.15); color: var(--ok); }
-    .badge.err { background: rgba(239,68,68,.15); color: var(--err); }
+    .badge.warn { background: rgba(245,158,11,.15); color: #fbbf24; }
     label { display: block; font-size: .8rem; color: var(--muted); margin-bottom: .3rem; }
-    input[type=text], input[type=date] {
+    input[type=text], input[type=date], input[type=file] {
       width: 100%; padding: .85rem .9rem; border-radius: 12px;
       border: 1px solid var(--border); background: #0f1324; color: var(--text);
       font-size: 1rem; margin-bottom: .9rem;
     }
-    .modes { display: grid; grid-template-columns: 1fr 1fr; gap: .65rem; margin-bottom: 1rem; }
-    .mode {
-      border: 1px solid var(--border); border-radius: 12px; padding: .85rem;
-      background: #12172a; cursor: pointer;
-    }
-    .mode:has(input:checked) { border-color: var(--accent); background: rgba(255,107,0,.12); }
-    .mode input { margin-right: .4rem; }
-    .mode strong { display: block; margin-bottom: .15rem; font-size: .95rem; }
-    .mode span { font-size: .75rem; color: var(--muted); line-height: 1.3; }
-    .row { display: grid; grid-template-columns: 1fr 1fr; gap: .65rem; }
+    input[type=file] { padding: .65rem; }
     button[type=submit], .btn-pdf {
       width: 100%; border: 0; border-radius: 12px; padding: 1rem;
       font-size: 1.05rem; font-weight: 700; color: #fff; cursor: pointer;
@@ -69,6 +61,11 @@
     button[type=submit] {
       background: linear-gradient(90deg, var(--accent), #ff8c33);
       box-shadow: 0 8px 24px rgba(255,107,0,.3);
+    }
+    button[type=submit].secondary {
+      background: linear-gradient(90deg, #4b5563, #374151);
+      box-shadow: none;
+      margin-top: .5rem;
     }
     button[type=submit]:disabled { opacity: .55; cursor: wait; }
     .btn-pdf {
@@ -90,41 +87,59 @@
     #loading { display: none; text-align: center; color: var(--muted); margin-top: .75rem; font-size: .9rem; }
     .steps { font-size: .8rem; color: var(--muted); line-height: 1.5; }
     .steps ol { padding-left: 1.15rem; margin: .4rem 0 0; }
+    .divider {
+      text-align: center; color: var(--muted); font-size: .75rem;
+      margin: 1rem 0 .5rem; opacity: .8;
+    }
   </style>
 </head>
 <body>
   <div class="wrap">
     <header>
       <h1>Resumo de Rota</h1>
-      <p>No celular você só recebe <strong>1 PDF de resumo</strong> (cidade e horários). Os arquivos brutos do rastreador ficam no servidor e são apagados.</p>
+      <p>Gera <strong>1 PDF de resumo</strong> (cidade e horários). O histórico completo do rastreador <strong>não fica no celular</strong> — é apagado no servidor.</p>
     </header>
 
+    <!-- CAMINHO PRINCIPAL: upload do PDF do Sitrax -->
     <div class="card">
-      {% if configured %}
-        <div class="badge ok">● Servidor conectado ao rastreador</div>
-      {% else %}
-        <div class="badge err">● Servidor sem credenciais</div>
-      {% endif %}
+      <div class="badge ok">● Recomendado (funciona no celular)</div>
+      <h2>1. Enviar PDF do Sitrax</h2>
+      <p class="hint" style="margin-top:0;margin-bottom:.9rem">
+        No Sitrax: Posições → escolha o veículo → Filtrar → toque no ícone de <strong>download (nuvem)</strong>.
+        Depois envie esse PDF aqui.
+      </p>
+      <form method="post" action="/gerar-pdf" enctype="multipart/form-data" id="form-pdf">
+        <label for="pdf">Arquivo PDF (HistoricoPosicoes…)</label>
+        <input id="pdf" name="pdf" type="file" accept="application/pdf,.pdf" required />
 
-      <form method="post" action="/gerar" id="form">
-        <div class="modes">
-          <label class="mode">
-            <input type="radio" name="modo" value="placa" {% if not modo or modo == 'placa' %}checked{% endif %} />
-            <strong>1 veículo</strong>
-            <span>Informe a placa</span>
-          </label>
-          <label class="mode">
-            <input type="radio" name="modo" value="todos" {% if modo == 'todos' %}checked{% endif %} />
-            <strong>Todos</strong>
-            <span>Frota inteira (mais lento)</span>
-          </label>
-        </div>
+        <label for="placa_pdf">Placa (opcional)</label>
+        <input id="placa_pdf" name="placa" type="text" placeholder="Ex: PCE7B03" style="text-transform:uppercase" />
 
+        <label for="data_pdf">Data do relatório</label>
+        <input id="data_pdf" name="data" type="date" value="{{ today }}" />
+
+        <button type="submit" id="btn-pdf">Gerar resumo deste PDF</button>
+        <p class="hint">
+          O PDF do Sitrax fica só no servidor por alguns segundos, o resumo é gerado e o arquivo bruto é <strong>apagado</strong>.
+          No celular fica só o PDF de resumo, se você baixar.
+        </p>
+      </form>
+    </div>
+
+    <!-- CAMINHO AUTOMÁTICO (pode falhar no Railway) -->
+    <div class="card">
+      <div class="badge warn">○ Automático (experimental)</div>
+      <h2>2. Buscar no Sitrax sozinho</h2>
+      <p class="hint" style="margin-top:0;margin-bottom:.9rem">
+        O servidor tenta entrar no Sitrax com Chrome. Na nuvem isso às vezes falha (menu/headless).
+        Prefira o envio do PDF acima.
+      </p>
+      <form method="post" action="/gerar" id="form-auto">
         <label for="placa">Placa</label>
         <input id="placa" name="placa" type="text" placeholder="Ex: PCE7B03"
-               value="{{ placa or '' }}" style="text-transform:uppercase" autocomplete="off" />
-
-        <div class="row">
+               value="{{ placa or '' }}" style="text-transform:uppercase" />
+        <input type="hidden" name="modo" value="placa" />
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:.65rem">
           <div>
             <label for="data_ini">Data início</label>
             <input id="data_ini" name="data_ini" type="date" value="{{ data_ini or today }}" />
@@ -134,29 +149,26 @@
             <input id="data_fim" name="data_fim" type="date" value="{{ data_fim or today }}" />
           </div>
         </div>
-
-        <button type="submit" id="btn">Gerar resumo</button>
-        <div id="loading">⏳ Buscando no rastreador e montando o resumo… pode levar alguns minutos. Não feche esta tela.</div>
-        <p class="hint">
-          O servidor entra no Sitrax, lê o histórico, monta o resumo e <strong>apaga os arquivos temporários</strong>.
-          No seu celular só fica o PDF do resumo (se você baixar).
-        </p>
+        <button type="submit" class="secondary" id="btn-auto">Tentar automático</button>
       </form>
     </div>
 
+    <div id="loading">⏳ Processando… não feche esta tela.</div>
+
     {% if error %}
     <div class="card">
-      <h2 style="margin:0 0 .6rem;font-size:1rem">Erro</h2>
+      <h2>Erro</h2>
       <pre class="error">{{ error }}</pre>
+      <p class="hint">Dica: baixe o PDF no Sitrax e use a opção <strong>Enviar PDF</strong> acima — é mais estável.</p>
     </div>
     {% endif %}
 
     {% if texto or has_pdf %}
     <div class="card">
-      <h2 style="margin:0 0 .6rem;font-size:1rem">Seu resumo</h2>
+      <h2>Seu resumo</h2>
       {% if has_pdf %}
         <a class="btn-pdf" href="/baixar-resumo">⬇ Baixar PDF do resumo{% if pdf_name %} ({{ pdf_name }}){% endif %}</a>
-        <p class="hint">Este é o único arquivo para o celular — não é o histórico completo do rastreador.</p>
+        <p class="hint">Único arquivo para o celular — não é o histórico completo do Sitrax.</p>
       {% endif %}
       {% if texto %}
         <pre class="result" style="margin-top:.85rem">{{ texto }}</pre>
@@ -165,26 +177,30 @@
     {% endif %}
 
     <div class="card steps">
-      <strong>Como funciona (nuvem)</strong>
+      <strong>Fluxo ideal no celular</strong>
       <ol>
-        <li>Você escolhe 1 placa ou todos, no celular</li>
-        <li>O servidor consulta o rastreador (Sitrax)</li>
-        <li>Arquivos brutos ficam em pasta temporária no servidor</li>
-        <li>O servidor monta 1 PDF de resumo (cidade / horário)</li>
-        <li>Os arquivos brutos são <strong>apagados</strong></li>
-        <li>Você baixa só o resumo, se quiser</li>
+        <li>Abra o Sitrax → Histórico de Posições</li>
+        <li>Escolha o veículo e a data → Filtrar</li>
+        <li>Toque na <strong>nuvem de download</strong></li>
+        <li>Volte aqui e envie o PDF baixado</li>
+        <li>Receba o resumo (ex.: 12h–14h em Paulista)</li>
+        <li>O PDF bruto é apagado no servidor</li>
       </ol>
     </div>
   </div>
   <script>
-    const form = document.getElementById('form');
-    const btn = document.getElementById('btn');
-    const loading = document.getElementById('loading');
-    form.addEventListener('submit', () => {
-      btn.disabled = true;
-      btn.textContent = 'Gerando…';
-      loading.style.display = 'block';
-    });
+    function wire(formId, btnId) {
+      const form = document.getElementById(formId);
+      const btn = document.getElementById(btnId);
+      const loading = document.getElementById('loading');
+      if (!form) return;
+      form.addEventListener('submit', () => {
+        if (btn) { btn.disabled = true; btn.textContent = 'Gerando…'; }
+        loading.style.display = 'block';
+      });
+    }
+    wire('form-pdf', 'btn-pdf');
+    wire('form-auto', 'btn-auto');
   </script>
 </body>
 </html>
