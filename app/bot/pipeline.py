@@ -129,12 +129,16 @@ def generate_vehicle_report_cloud(
             # Chrome baixa PDF BRUTO só em tmp (nunca no celular)
             with SitraxBot(headless=headless, download_dir=tmp) as bot:
                 bot.login()
-                # Caminho principal: baixar PDF do Sitrax (mesmo do botão nuvem)
-                # → parse → resumo. Fallback: scrape da tabela se download falhar.
+                # 1) Filtra histórico  2) tenta PDF  3) se falhar, lê tabela já na tela
+                bot._prepare_historico_filtrado(placa, data_ini, data_fim)
                 pdf_bruto = None
                 try:
                     pdf_bruto = bot.download_historico_pdf(
-                        placa, data_ini=data_ini, data_fim=data_fim, dest_dir=tmp
+                        placa,
+                        data_ini=data_ini,
+                        data_fim=data_fim,
+                        dest_dir=tmp,
+                        already_filtered=True,
                     )
                 except Exception as e:
                     logger.warning("Download PDF Sitrax falhou: %s", e)
@@ -158,12 +162,17 @@ def generate_vehicle_report_cloud(
                         pdf_bruto, placa=placa, data_ref=data_ref
                     )
                 else:
-                    logger.warning("Sem PDF bruto; tentando scrape da tabela")
-                    positions = bot.get_positions_for_plate(
-                        placa,
-                        data_ini=data_ini,
-                        data_fim=data_fim,
-                        already_on_posicoes=False,
+                    logger.warning(
+                        "Sem PDF bruto; lendo tabela já filtrada (sem refazer login/filtro)"
+                    )
+                    bot.try_scroll_all()
+                    rows = bot.scrape_positions_table()
+                    positions = positions_from_rows(rows)
+                    debug_session.step(
+                        "scrape_tabela",
+                        f"{len(positions)} ponto(s) lidos da tela",
+                        ok=bool(positions),
+                        screenshot=True,
                     )
                     result = report_from_positions(
                         placa, positions, data_ref=data_ref

@@ -194,24 +194,44 @@ class SitraxBot:
         except Exception as e:
             logger.warning("CDP desktop viewport: %s", e)
 
-        # Chrome headless: força download dir via CDP
-        if self.download_dir:
-            try:
-                self.driver.execute_cdp_cmd(
-                    "Page.setDownloadBehavior",
-                    {
-                        "behavior": "allow",
-                        "downloadPath": str(self.download_dir.resolve()),
-                    },
-                )
-            except Exception as e:
-                logger.warning("CDP download path: %s", e)
+        # Chrome headless: força download dir via CDP (Page + Browser)
+        self._ensure_download_behavior()
 
         self._trace(
             "chrome_pronto",
             f"Chrome desktop 1920x1080 headless={self.headless}",
             shot=True,
         )
+
+    def _ensure_download_behavior(self) -> None:
+        """Garante que PDF do Sitrax caia na pasta temp (headless Docker/Railway)."""
+        if not self.driver or not self.download_dir:
+            return
+        path = str(self.download_dir.resolve())
+        self.download_dir.mkdir(parents=True, exist_ok=True)
+        # Browser (Chrome moderno) + Page (fallback)
+        for cmd, params in (
+            (
+                "Browser.setDownloadBehavior",
+                {
+                    "behavior": "allow",
+                    "downloadPath": path,
+                    "eventsEnabled": True,
+                },
+            ),
+            (
+                "Page.setDownloadBehavior",
+                {"behavior": "allow", "downloadPath": path},
+            ),
+        ):
+            try:
+                self.driver.execute_cdp_cmd(cmd, params)
+            except Exception as e:
+                logger.debug("CDP %s: %s", cmd, e)
+        try:
+            self.driver.execute_cdp_cmd("Network.enable", {})
+        except Exception:
+            pass
 
     def close(self) -> None:
         if self.driver:
@@ -1530,12 +1550,12 @@ class SitraxBot:
                         return i
             return None
 
-        idx_gps = find_col("Data GPS", "GPS")
-        idx_sis = find_col("Data Sistema", "Sistema")
-        idx_modo = find_col("Modo")
-        idx_end = find_col("Endereço", "Endereco")
-        idx_ref = find_col("Referência", "Referencia")
-        idx_temp = find_col("Temperatura")
+        idx_gps = find_col("Data GPS", "GPS Date", "GPS")
+        idx_sis = find_col("Data Sistema", "Date System", "System Date", "Sistema")
+        idx_modo = find_col("Modo", "Mode", "Status")
+        idx_end = find_col("Endereço", "Endereco", "Address", "Location")
+        idx_ref = find_col("Referência", "Referencia", "Reference")
+        idx_temp = find_col("Temperatura", "Temperature")
 
         rows_data: list[dict] = []
         for row in table.find_elements(By.CSS_SELECTOR, "tbody tr"):
@@ -1565,7 +1585,11 @@ class SitraxBot:
                         break
             if not item["modo"]:
                 for t in texts:
-                    if re.search(r"(estacionado|normal|alerta|igni|emerg)", t, re.I):
+                    if re.search(
+                        r"(estacionado|normal|alerta|igni|emerg|parked|in motion|motion)",
+                        t,
+                        re.I,
+                    ):
                         item["modo"] = t
                         break
             if not re.search(r"\d{2}/\d{2}/\d{4}", item.get("data_gps") or ""):
@@ -1609,11 +1633,8 @@ class SitraxBot:
         self.click_filtrar()
         self._sleep(2)
 
-    def _click_download_cloud(self) -> None:
-        """
-        Clica no ícone de nuvem roxa ao lado do botão Filter/Filtrar.
-        (visto na calibração: Filter laranja + nuvem download)
-        """
+    def _click_export_cloud_icon(self) -> None:
+        """Abre o menu Export (icone de nuvem ao lado do Filter)."""
         d = self._d()
         self._sleep(0.5)
         clicked = False
@@ -1624,7 +1645,6 @@ class SitraxBot:
                   var r = el.getBoundingClientRect();
                   return r.width > 2 && r.height > 2;
                 }
-                // 1) ícones font-awesome de nuvem / download
                 var sels = [
                   'i.fa-cloud-arrow-down', 'i.fa-cloud-download', 'i.fa-cloud-download-alt',
                   'i.fa-cloud', 'i.fa-download',
@@ -1640,13 +1660,11 @@ class SitraxBot:
                     var el = nodes[i];
                     if (el.closest && el.closest('#sidebar-menu')) continue;
                     if (!visible(el)) continue;
-                    // prefere o que está perto do botão Filter
                     el.scrollIntoView({block:'center'});
                     el.click();
                     return 'sel:' + sels[s];
                   }
                 }
-                // 2) irmão / vizinho do botão Filter (laranja)
                 var filters = document.querySelectorAll('button,a');
                 for (var f = 0; f < filters.length; f++) {
                   var t = (filters[f].innerText || filters[f].textContent || '').trim();
@@ -1659,19 +1677,14 @@ class SitraxBot:
                     if (c === filters[f]) continue;
                     var cls = (c.className || '') + '';
                     var oc = c.getAttribute('onclick') || '';
-                    if (/cloud|download|export/i.test(cls + ' ' + oc) || visible(c) && c !== filters[f]) {
-                      // clica no que parece ícone ao lado
-                      if (/cloud|download|export/i.test(cls + ' ' + oc)) {
-                        c.click();
-                        return 'near-filter';
-                      }
+                    if (/cloud|download|export/i.test(cls + ' ' + oc)) {
+                      c.click();
+                      return 'near-filter';
                     }
                   }
-                  // próximo irmão
                   var sib = filters[f].nextElementSibling;
                   if (sib) { sib.click(); return 'filter-next-sibling'; }
                 }
-                // 3) qualquer elemento roxo/clickável com cloud no class
                 var all = document.querySelectorAll('i,button,a,span,div');
                 for (var j = 0; j < all.length; j++) {
                   var e = all[j];
@@ -1695,8 +1708,14 @@ class SitraxBot:
 
         if not clicked:
             for sel in [
-                (By.CSS_SELECTOR, "i.fa-cloud-arrow-down, i.fa-cloud-download-alt, i.fa-cloud, i[class*='cloud']"),
-                (By.CSS_SELECTOR, "[onclick*='export'], [onclick*='Export'], [onclick*='download']"),
+                (
+                    By.CSS_SELECTOR,
+                    "i.fa-cloud-arrow-down, i.fa-cloud-download-alt, i.fa-cloud, i[class*='cloud']",
+                ),
+                (
+                    By.CSS_SELECTOR,
+                    "[onclick*='export'], [onclick*='Export'], [onclick*='download']",
+                ),
             ]:
                 try:
                     for el in d.find_elements(*sel):
@@ -1715,123 +1734,318 @@ class SitraxBot:
         if not clicked:
             self._save_debug(
                 "download_nao_encontrado",
-                "Ícone de nuvem (download) não encontrado ao lado do Filter",
+                "Icone de nuvem (download) nao encontrado ao lado do Filter",
                 ok=False,
             )
             raise TimeoutException(
-                "Não achei o botão de download (nuvem) do histórico. "
-                "Abra /debug."
+                "Nao achei o botao de download (nuvem) do historico. Abra /debug."
             )
         self._trace("download_cloud_aberta", "Nuvem clicada — esperando menu Export")
-        self._sleep(0.6)
+        self._sleep(0.8)
 
-        # Menu Export: PDF file | XLS file  (foto /debug)
-        # Precisa clicar em "PDF file" (não XLS)
-        pdf_clicked = False
-        end_menu = time.time() + 12
-        while time.time() < end_menu and not pdf_clicked:
-            # espera o menu aparecer
+    def _activate_pdf_menu_item(self) -> bool:
+        """Clica de verdade no item PDF file (sobe ate o <a>/li com handler JSF)."""
+        d = self._d()
+        xpaths = (
+            "//a[normalize-space()='PDF file' or normalize-space()='PDF File' or normalize-space()='Arquivo PDF']",
+            "//span[normalize-space()='PDF file' or normalize-space()='PDF File']/ancestor::a[1]",
+            "//*[normalize-space()='PDF file']/ancestor::*[self::a or self::button or self::li][1]",
+            "//a[contains(.,'PDF file') and not(contains(.,'XLS'))]",
+            "//*[contains(@class,'menuitem') or contains(@class,'dropdown')]"
+            "//*[normalize-space()='PDF file' or normalize-space()='Arquivo PDF']",
+        )
+        for xp in xpaths:
             try:
-                ready = d.execute_script(
+                for el in d.find_elements(By.XPATH, xp):
+                    try:
+                        if not el.is_displayed():
+                            continue
+                        t = (el.text or "").replace("\n", " ").strip()
+                        if re.search(r"xls", t, re.I) and "pdf" not in t.lower():
+                            continue
+                        d.execute_script(
+                            "arguments[0].scrollIntoView({block:'center'});", el
+                        )
+                        self._sleep(0.15)
+                        try:
+                            ActionChains(d).move_to_element(el).pause(0.05).click(
+                                el
+                            ).perform()
+                        except Exception:
+                            d.execute_script("arguments[0].click();", el)
+                        d.execute_script(
+                            """
+                            var el = arguments[0];
+                            var t = el;
+                            for (var i = 0; i < 6 && t; i++) {
+                              var tag = (t.tagName || '').toUpperCase();
+                              var oc = t.getAttribute && (t.getAttribute('onclick') || '');
+                              var href = t.getAttribute && (t.getAttribute('href') || '');
+                              if (tag === 'A' || tag === 'BUTTON' || oc || href ||
+                                  (t.getAttribute && t.getAttribute('role') === 'menuitem')) {
+                                el = t; break;
+                              }
+                              t = t.parentElement;
+                            }
+                            el.focus && el.focus();
+                            ['pointerdown','mousedown','pointerup','mouseup','click'].forEach(function(type) {
+                              el.dispatchEvent(new MouseEvent(type, {
+                                bubbles: true, cancelable: true, view: window, buttons: 1
+                              }));
+                            });
+                            if (typeof el.click === 'function') el.click();
+                            """,
+                            el,
+                        )
+                        logger.info("Clique PDF menu via xpath text=%s", t[:40])
+                        return True
+                    except Exception as e:
+                        logger.debug("xpath PDF fail: %s", e)
+                        continue
+            except Exception:
+                continue
+
+        try:
+            res = d.execute_script(
+                """
+                function visible(el) {
+                  var r = el.getBoundingClientRect();
+                  return r.width > 1 && r.height > 1;
+                }
+                function activate(el) {
+                  var t = el;
+                  for (var i = 0; i < 8 && t; i++) {
+                    var tag = (t.tagName || '').toUpperCase();
+                    var oc = t.getAttribute ? (t.getAttribute('onclick') || '') : '';
+                    var href = t.getAttribute ? (t.getAttribute('href') || '') : '';
+                    var role = t.getAttribute ? (t.getAttribute('role') || '') : '';
+                    if (tag === 'A' || tag === 'BUTTON' || oc || href || role === 'menuitem'
+                        || /menuitem|dropdown-item/i.test(t.className || '')) {
+                      el = t; break;
+                    }
+                    t = t.parentElement;
+                  }
+                  el.scrollIntoView({block:'center'});
+                  el.focus && el.focus();
+                  ['pointerdown','mousedown','pointerup','mouseup','click'].forEach(function(type) {
+                    el.dispatchEvent(new MouseEvent(type, {
+                      bubbles: true, cancelable: true, view: window, buttons: 1
+                    }));
+                  });
+                  if (typeof el.click === 'function') el.click();
+                  return (el.innerText || el.textContent || 'PDF').replace(/\\s+/g,' ').trim().slice(0,40);
+                }
+                var nodes = document.querySelectorAll('a,button,span,div,li,label,p');
+                var candidates = [];
+                for (var i = 0; i < nodes.length; i++) {
+                  var el = nodes[i];
+                  if (!visible(el)) continue;
+                  var tx = (el.innerText || el.textContent || '').replace(/\\s+/g,' ').trim();
+                  if (!tx || /xls/i.test(tx)) continue;
+                  if (tx === 'PDF file' || tx === 'PDF File' || tx === 'Arquivo PDF'
+                      || tx === 'Export PDF' || tx === 'Exportar PDF'
+                      || (/^PDF\\s*file$/i.test(tx))
+                      || (tx.indexOf('PDF file') >= 0 && tx.length < 40)) {
+                    candidates.push(el);
+                  }
+                }
+                candidates.sort(function(a,b) {
+                  return (a.innerText||'').trim().length - (b.innerText||'').trim().length;
+                });
+                if (candidates.length) return activate(candidates[0]);
+                return null;
+                """
+            )
+            if res:
+                logger.info("Clique PDF menu via JS: %s", res)
+                return True
+        except Exception as e:
+            logger.warning("JS PDF menu: %s", e)
+        return False
+
+    def _click_download_cloud(self) -> None:
+        """Clica nuvem (Export) -> item PDF file. Nao espera o arquivo."""
+        self._ensure_download_behavior()
+        self._click_export_cloud_icon()
+
+        pdf_clicked = False
+        end_menu = time.time() + 15
+        while time.time() < end_menu and not pdf_clicked:
+            try:
+                ready = self._d().execute_script(
                     """
                     var body = document.body.innerText || '';
                     return body.indexOf('PDF file') >= 0
                         || body.indexOf('PDF File') >= 0
-                        || body.indexOf('Arquivo PDF') >= 0
-                        || body.indexOf('Export') >= 0;
+                        || body.indexOf('Arquivo PDF') >= 0;
                     """
                 )
             except Exception:
                 ready = False
-
-            if ready:
-                try:
-                    res2 = d.execute_script(
-                        """
-                        function clickPdf() {
-                          var nodes = document.querySelectorAll('a,button,span,div,li,label,p');
-                          var best = null;
-                          for (var i = 0; i < nodes.length; i++) {
-                            var el = nodes[i];
-                            var t = (el.innerText || el.textContent || '').replace(/\\s+/g,' ').trim();
-                            if (!t) continue;
-                            // evitar XLS
-                            if (/xls/i.test(t)) continue;
-                            // PDF file (EN) — prioridade
-                            if (t === 'PDF file' || t === 'PDF File' || t === 'Pdf file') {
-                              best = el; break;
-                            }
-                            if (t === 'Arquivo PDF' || t === 'Export PDF' || t === 'Exportar PDF') {
-                              best = el; break;
-                            }
-                            // linha do menu tipo "PDF file" com ícone
-                            if (/^PDF\\s*file$/i.test(t) || t.toLowerCase() === 'pdf') {
-                              // "pdf" sozinho só se for item curto do menu
-                              if (t.length <= 12) { best = el; break; }
-                            }
-                            if (t.indexOf('PDF file') >= 0 && t.length < 40) {
-                              best = el;
-                            }
-                          }
-                          if (best) {
-                            best.scrollIntoView({block:'center'});
-                            best.click();
-                            return (best.innerText || best.textContent || 'PDF').trim();
-                          }
-                          return null;
-                        }
-                        return clickPdf();
-                        """
-                    )
-                    if res2:
-                        pdf_clicked = True
-                        logger.info("Clicou menu Export → %s", res2)
-                        self._trace(
-                            "download_pdf_file",
-                            f"Clicou no menu: {res2}",
-                            ok=True,
-                            shot=True,
-                        )
-                        break
-                except Exception as e:
-                    logger.warning("Clique PDF file: %s", e)
-
-            # Selenium: texto exato
-            if not pdf_clicked:
-                for xp in (
-                    "//*[normalize-space()='PDF file']",
-                    "//*[normalize-space()='PDF File']",
-                    "//*[contains(normalize-space(.),'PDF file') and not(contains(.,'XLS'))]",
-                    "//*[contains(normalize-space(.),'Arquivo PDF')]",
-                ):
-                    try:
-                        els = d.find_elements(By.XPATH, xp)
-                        for el in els:
-                            t = (el.text or "").strip()
-                            if "XLS" in t or "xls" in t.lower():
-                                continue
-                            d.execute_script("arguments[0].click();", el)
-                            pdf_clicked = True
-                            self._trace("download_pdf_file", f"Selenium: {t}", shot=True)
-                            break
-                    except Exception:
-                        continue
-                    if pdf_clicked:
-                        break
-
-            if not pdf_clicked:
-                self._sleep(0.35)
+            if ready and self._activate_pdf_menu_item():
+                pdf_clicked = True
+                self._trace(
+                    "download_pdf_file",
+                    "Clicou no menu: PDF file (handler JSF)",
+                    ok=True,
+                    shot=True,
+                )
+                break
+            self._sleep(0.35)
 
         if not pdf_clicked:
             self._save_debug(
                 "download_menu_pdf_nao_clicado",
-                "Menu Export aberto mas 'PDF file' não foi clicado",
+                "Menu Export aberto mas PDF file nao foi clicado",
                 ok=False,
             )
             raise TimeoutException(
-                "Abriu Export mas não clicou em 'PDF file'. Abra /debug."
+                "Abriu Export mas nao clicou em 'PDF file'. Abra /debug."
             )
-        self._sleep(1.5)
+        self._sleep(1.0)
+
+    def _try_save_pdf_from_open_tabs(self, dest: Path) -> Optional[Path]:
+        """Se o Sitrax abriu o PDF em nova aba, baixa via URL + cookies da sessao."""
+        d = self._d()
+        main = d.current_window_handle
+        saved: Optional[Path] = None
+        try:
+            import urllib.request
+            import http.cookiejar
+
+            for handle in list(d.window_handles):
+                try:
+                    d.switch_to.window(handle)
+                    url = d.current_url or ""
+                    ctype = ""
+                    try:
+                        ctype = (
+                            d.execute_script("return document.contentType || '';") or ""
+                        )
+                    except Exception:
+                        pass
+                    is_pdf_url = bool(
+                        re.search(r"\.pdf($|\?)", url, re.I)
+                        or "application/pdf" in ctype.lower()
+                        or re.search(r"export|relatorio|report|download", url, re.I)
+                    )
+                    if not is_pdf_url and url.startswith("blob:"):
+                        is_pdf_url = True
+                    if not is_pdf_url and handle == main:
+                        continue
+                    if not url or url in ("about:blank", "data:,"):
+                        continue
+
+                    if url.startswith("http"):
+                        cj = http.cookiejar.CookieJar()
+                        for c in d.get_cookies():
+                            try:
+                                ck = http.cookiejar.Cookie(
+                                    version=0,
+                                    name=c["name"],
+                                    value=c["value"],
+                                    port=None,
+                                    port_specified=False,
+                                    domain=c.get("domain") or "",
+                                    domain_specified=bool(c.get("domain")),
+                                    domain_initial_dot=(c.get("domain") or "").startswith(
+                                        "."
+                                    ),
+                                    path=c.get("path") or "/",
+                                    path_specified=True,
+                                    secure=bool(c.get("secure")),
+                                    expires=None,
+                                    discard=True,
+                                    comment=None,
+                                    comment_url=None,
+                                    rest={"HttpOnly": None},
+                                    rfc2109=False,
+                                )
+                                cj.set_cookie(ck)
+                            except Exception:
+                                continue
+                        opener = urllib.request.build_opener(
+                            urllib.request.HTTPCookieProcessor(cj)
+                        )
+                        ua = "Mozilla/5.0"
+                        try:
+                            ua = d.execute_script("return navigator.userAgent;") or ua
+                        except Exception:
+                            pass
+                        req = urllib.request.Request(url, headers={"User-Agent": ua})
+                        with opener.open(req, timeout=90) as resp:
+                            data = resp.read()
+                        if data[:4] == b"%PDF" or len(data) > 2000:
+                            out = dest / f"sitrax_tab_{int(time.time())}.pdf"
+                            out.write_bytes(data)
+                            if out.stat().st_size > 500:
+                                saved = out
+                                logger.info(
+                                    "PDF capturado de aba: %s (%s bytes)",
+                                    out.name,
+                                    out.stat().st_size,
+                                )
+                                break
+                except Exception as e:
+                    logger.debug("Aba PDF: %s", e)
+                    continue
+        finally:
+            try:
+                if main in d.window_handles:
+                    d.switch_to.window(main)
+            except Exception:
+                pass
+        return saved
+
+    def _wait_pdf_download(
+        self,
+        dest: Path,
+        before: set[str],
+        timeout: float = 120,
+    ) -> Optional[Path]:
+        """Espera PDF na pasta temp OU captura de nova aba."""
+        end = time.time() + timeout
+        last_partial = False
+        while time.time() < end:
+            partial = (
+                list(dest.glob("*.crdownload"))
+                + list(dest.glob("*.tmp"))
+                + list(dest.glob("*.part"))
+            )
+            if partial:
+                last_partial = True
+                time.sleep(0.5)
+                continue
+            news = [p for p in dest.glob("*.pdf") if p.name not in before]
+            if not news:
+                for p in dest.iterdir():
+                    if not p.is_file() or p.name in before:
+                        continue
+                    try:
+                        if p.stat().st_size > 1000 and p.read_bytes()[:4] == b"%PDF":
+                            news.append(p)
+                    except Exception:
+                        pass
+            if news:
+                newest = max(news, key=lambda p: p.stat().st_mtime)
+                if newest.stat().st_size > 1000:
+                    sz1 = newest.stat().st_size
+                    time.sleep(0.6)
+                    sz2 = newest.stat().st_size
+                    if sz2 == sz1:
+                        logger.info(
+                            "PDF bruto baixado no servidor: %s (%s bytes)",
+                            newest,
+                            sz2,
+                        )
+                        return newest
+            tab_pdf = self._try_save_pdf_from_open_tabs(dest)
+            if tab_pdf and tab_pdf.exists() and tab_pdf.stat().st_size > 1000:
+                return tab_pdf
+            time.sleep(0.45)
+        if last_partial:
+            logger.warning("Download ficou em .crdownload ate o timeout")
+        return None
 
     def download_historico_pdf(
         self,
@@ -1839,42 +2053,58 @@ class SitraxBot:
         data_ini: Optional[date] = None,
         data_fim: Optional[date] = None,
         dest_dir: Optional[Path | str] = None,
-        timeout: float = 90,
+        timeout: float = 120,
+        already_filtered: bool = False,
     ) -> Optional[Path]:
         """
         Fluxo:
-          posições → veículo → filtrar → clicar nuvem/download
-        O PDF BRUTO cai em dest_dir (temp no servidor) — NÃO no celular.
-        Retorna o caminho do arquivo baixado.
+          posicoes -> veiculo -> filtrar -> nuvem -> PDF file
+        PDF BRUTO so no servidor (temp). Retorna caminho do arquivo.
         """
         dest = Path(dest_dir) if dest_dir else self.download_dir
         if not dest:
-            raise ValueError("download_dir/dest_dir obrigatório para PDF bruto no servidor")
+            raise ValueError(
+                "download_dir/dest_dir obrigatorio para PDF bruto no servidor"
+            )
         dest.mkdir(parents=True, exist_ok=True)
+        if self.download_dir is None:
+            self.download_dir = dest
+        self._ensure_download_behavior()
 
-        before = {p.name for p in dest.glob("*.pdf")}
-        self._prepare_historico_filtrado(placa, data_ini, data_fim)
+        before = {p.name for p in dest.glob("*") if p.is_file()}
+        if not already_filtered:
+            self._prepare_historico_filtrado(placa, data_ini, data_fim)
 
+        handles_before = set(self._d().window_handles)
         self._click_download_cloud()
 
-        # espera PDF aparecer na pasta temp
-        end = time.time() + timeout
-        while time.time() < end:
-            pdfs = list(dest.glob("*.pdf"))
-            # ignora .crdownload
-            partial = list(dest.glob("*.crdownload")) + list(dest.glob("*.tmp"))
-            if partial:
-                time.sleep(0.5)
-                continue
-            new = [p for p in pdfs if p.name not in before]
-            if new:
-                newest = max(new, key=lambda p: p.stat().st_mtime)
-                if newest.stat().st_size > 1000:
-                    logger.info("PDF bruto baixado no servidor: %s", newest)
-                    return newest
-            time.sleep(0.5)
+        pdf = self._wait_pdf_download(dest, before, timeout=timeout)
+        if pdf:
+            self._trace(
+                "download_ok",
+                f"PDF no servidor: {pdf.name} ({pdf.stat().st_size} bytes)",
+                ok=True,
+                shot=True,
+            )
+            return pdf
 
-        self._save_debug("download_timeout")
+        d = self._d()
+        new_handles = [h for h in d.window_handles if h not in handles_before]
+        if new_handles:
+            self._trace(
+                "download_nova_aba",
+                f"{len(new_handles)} aba(s) nova(s) — tentando capturar PDF",
+                shot=True,
+            )
+            tab_pdf = self._try_save_pdf_from_open_tabs(dest)
+            if tab_pdf:
+                return tab_pdf
+
+        self._save_debug(
+            "download_timeout",
+            f"Timeout esperando PDF em {dest} ({timeout}s)",
+            ok=False,
+        )
         raise TimeoutException(f"Timeout esperando PDF em {dest}")
 
     def get_positions_for_plate(

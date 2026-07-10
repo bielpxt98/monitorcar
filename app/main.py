@@ -510,44 +510,52 @@ async def calibrar(request: Request):
                     bot.click_filtrar()
                     bot._trace("calibragem_filter", "Clicou Filter")
                     bot._sleep(2)
-                    before = {p.name for p in tmp.glob("*.pdf")}
-                    # reutiliza lógica de download
-                    from pathlib import Path as P
 
                     try:
-                        # nuvem → menu Export → "PDF file"
-                        bot._click_download_cloud()
-                        end = __import__("time").time() + 90
-                        pdf = None
-                        while __import__("time").time() < end:
-                            partial = list(tmp.glob("*.crdownload")) + list(
-                                tmp.glob("*.tmp")
-                            )
-                            if partial:
-                                __import__("time").sleep(0.5)
-                                continue
-                            news = [
-                                p for p in tmp.glob("*.pdf") if p.name not in before
-                            ]
-                            if news:
-                                pdf = max(news, key=lambda p: p.stat().st_mtime)
-                                if pdf.stat().st_size > 1000:
-                                    break
-                            __import__("time").sleep(0.4)
+                        # nuvem → Export → PDF file → espera arquivo no temp
+                        pdf = bot.download_historico_pdf(
+                            "PCE7B03",
+                            dest_dir=tmp,
+                            timeout=120,
+                            already_filtered=True,
+                        )
                         if pdf and pdf.exists():
                             bot._trace(
                                 "calibragem_ok",
                                 f"PDF baixado: {pdf.name} ({pdf.stat().st_size} bytes) — ciclo completo!",
                             )
                         else:
+                            raise TimeoutError("PDF vazio")
+                    except Exception as e:
+                        bot._trace(
+                            "calibragem_download_falhou",
+                            f"Download PDF falhou: {e} — tentando ler tabela na tela",
+                            ok=False,
+                        )
+                        # Plano B: dados já estão na tela (Filter OK)
+                        try:
+                            bot.try_scroll_all()
+                            rows = bot.scrape_positions_table()
+                            n = len(rows)
+                            if n > 0:
+                                bot._trace(
+                                    "calibragem_ok_tabela",
+                                    f"PDF nao baixou, mas tabela com {n} linha(s) lida — resumo automatico usara a tabela",
+                                    ok=True,
+                                )
+                            else:
+                                bot._trace(
+                                    "calibragem_download_timeout",
+                                    "Nem PDF nem linhas da tabela — ver logs",
+                                    ok=False,
+                                )
+                        except Exception as e2:
                             bot._trace(
-                                "calibragem_download_timeout",
-                                "Clicou Export/PDF mas o arquivo não chegou na pasta temp do servidor",
+                                "calibragem_scrape_falhou",
+                                str(e2),
                                 ok=False,
                             )
-                    except Exception as e:
-                        bot._trace("calibragem_download_falhou", str(e), ok=False)
-                        raise
+                            raise e
             debug_session.finish_run(ok=True)
         except Exception as e:
             debug_session.finish_run(ok=False, error=str(e))
