@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Optional
 
 from fastapi import FastAPI, Form, Request
-from fastapi.responses import HTMLResponse, JSONResponse, Response
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
@@ -162,6 +162,12 @@ def _run_job(modo: str, placa: str, d_ini: date, d_fim: date):
         pdf_filename=safe_filename("FROTA", data_ref),
         pontos=0,
     )
+
+
+@app.get("/gerar")
+async def gerar_get():
+    """Refresh/bookmark em /gerar → volta para a home (só POST gera relatório)."""
+    return RedirectResponse(url="/", status_code=303)
 
 
 @app.post("/gerar", response_class=HTMLResponse)
