@@ -146,6 +146,7 @@ def generate_vehicle_report_cloud(
                         "download_falhou", str(e), ok=False, screenshot=False
                     )
 
+                result = None
                 if pdf_bruto and Path(pdf_bruto).exists():
                     logger.info(
                         "Usando PDF baixado: %s (%s bytes)",
@@ -161,9 +162,22 @@ def generate_vehicle_report_cloud(
                     result = report_from_sitrax_pdf(
                         pdf_bruto, placa=placa, data_ref=data_ref
                     )
-                else:
+                    debug_session.step(
+                        "pdf_parse",
+                        f"{result.pontos} ponto(s) extraídos do PDF",
+                        ok=result.pontos > 0,
+                        screenshot=False,
+                    )
+                    # PDF baixou mas parser não entendeu (ex.: layout EN) → tabela
+                    if result.pontos == 0:
+                        logger.warning(
+                            "PDF com 0 posições parseadas; caindo para scrape da tabela"
+                        )
+                        result = None
+
+                if result is None:
                     logger.warning(
-                        "Sem PDF bruto; lendo tabela já filtrada (sem refazer login/filtro)"
+                        "Lendo tabela já filtrada (sem PDF útil / parse vazio)"
                     )
                     bot.try_scroll_all()
                     rows = bot.scrape_positions_table()

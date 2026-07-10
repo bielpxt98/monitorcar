@@ -1529,84 +1529,177 @@ class SitraxBot:
         self._sleep(1.5)
 
     def scrape_positions_table(self) -> list[dict]:
+        """Lê a grade de posições (EN/PT). Prefere extrair via JS (mais linhas)."""
         d = self._d()
-        self._sleep(1)
+        self._sleep(0.8)
+        # rola o corpo da tabela (DataTables / scroll interno)
+        try:
+            d.execute_script(
+                """
+                var boxes = document.querySelectorAll(
+                  '.dataTables_scrollBody, .ui-datatable-scrollable-body, ' +
+                  '.table-responsive, [class*="scroll"]'
+                );
+                for (var i = 0; i < boxes.length; i++) {
+                  try { boxes[i].scrollTop = boxes[i].scrollHeight; } catch(e) {}
+                }
+                window.scrollBy(0, 800);
+                """
+            )
+            self._sleep(0.5)
+        except Exception:
+            pass
+
+        # Extração em massa via JS (rápido e pega o que está no DOM)
+        try:
+            raw_rows = d.execute_script(
+                """
+                function txt(el) {
+                  return (el.innerText || el.textContent || '').replace(/\\s+/g,' ').trim();
+                }
+                var tables = Array.prototype.slice.call(document.querySelectorAll('table'));
+                if (!tables.length) return [];
+                tables.sort(function(a,b) {
+                  return b.querySelectorAll('tbody tr').length - a.querySelectorAll('tbody tr').length;
+                });
+                var table = tables[0];
+                var headers = [];
+                table.querySelectorAll('thead th').forEach(function(th) {
+                  headers.push(txt(th));
+                });
+                if (!headers.length) {
+                  var first = table.querySelector('tr');
+                  if (first) first.querySelectorAll('th,td').forEach(function(c) {
+                    headers.push(txt(c));
+                  });
+                }
+                function findCol(names) {
+                  for (var i = 0; i < headers.length; i++) {
+                    var hl = (headers[i] || '').toLowerCase();
+                    for (var n = 0; n < names.length; n++) {
+                      if (hl.indexOf(names[n].toLowerCase()) >= 0) return i;
+                    }
+                  }
+                  return -1;
+                }
+                var iGps = findCol(['GPS Date','Data GPS','GPS']);
+                var iSis = findCol(['Date System','System Date','Data Sistema','Sistema']);
+                var iModo = findCol(['Mode','Modo','Status']);
+                var iEnd = findCol(['Address','Location','Endereço','Endereco']);
+                var iRef = findCol(['Reference','Referência','Referencia']);
+                var iTemp = findCol(['Temperature','Temperatura']);
+                var out = [];
+                var trs = table.querySelectorAll('tbody tr');
+                for (var r = 0; r < trs.length; r++) {
+                  var cells = trs[r].querySelectorAll('td');
+                  if (!cells.length) continue;
+                  var texts = [];
+                  for (var c = 0; c < cells.length; c++) texts.push(txt(cells[c]));
+                  function cell(idx) {
+                    if (idx < 0 || idx >= texts.length) return '';
+                    return texts[idx];
+                  }
+                  var item = {
+                    data_gps: cell(iGps) || texts[0] || '',
+                    data_sistema: cell(iSis) || texts[1] || '',
+                    modo: cell(iModo),
+                    endereco: cell(iEnd),
+                    referencia: cell(iRef),
+                    temperatura: cell(iTemp),
+                    raw_cells: texts
+                  };
+                  // heurísticas se colunas vazias
+                  if (!item.modo) {
+                    for (var k = 0; k < texts.length; k++) {
+                      if (/parked|estacionado|normal|in motion|movimento|igni/i.test(texts[k])) {
+                        item.modo = texts[k]; break;
+                      }
+                    }
+                  }
+                  if (!/\\d{2}\\/\\d{2}\\/\\d{4}/.test(item.data_gps)) {
+                    for (var k2 = 0; k2 < texts.length; k2++) {
+                      if (/\\d{2}\\/\\d{2}\\/\\d{4}\\s+\\d{2}:\\d{2}/.test(texts[k2])) {
+                        item.data_gps = texts[k2]; break;
+                      }
+                    }
+                  }
+                  if (!item.endereco) {
+                    for (var k3 = 0; k3 < texts.length; k3++) {
+                      if (/\\([A-Z]{2}\\)/.test(texts[k3]) ||
+                          /rua|avenida|av\\.|rodovia|estrada|street|road/i.test(texts[k3])) {
+                        item.endereco = texts[k3]; break;
+                      }
+                    }
+                  }
+                  if (item.data_gps || item.endereco) out.push(item);
+                }
+                return out;
+                """
+            )
+            if raw_rows and isinstance(raw_rows, list):
+                logger.info("Posições lidas (JS): %s", len(raw_rows))
+                return raw_rows
+        except Exception as e:
+            logger.warning("Scrape JS falhou: %s", e)
+
+        # Fallback Selenium puro
         tables = d.find_elements(By.CSS_SELECTOR, "table")
         if not tables:
             return []
-
-        # pega a maior tabela com dados
-        table = max(tables, key=lambda t: len(t.find_elements(By.CSS_SELECTOR, "tbody tr")))
+        table = max(
+            tables, key=lambda t: len(t.find_elements(By.CSS_SELECTOR, "tbody tr"))
+        )
         headers = [th.text.strip() for th in table.find_elements(By.CSS_SELECTOR, "thead th")]
-        if not headers:
-            first = table.find_elements(By.CSS_SELECTOR, "tr")[0]
-            headers = [c.text.strip() for c in first.find_elements(By.CSS_SELECTOR, "th, td")]
-
-        def find_col(*names: str) -> Optional[int]:
-            for i, h in enumerate(headers):
-                hl = h.lower()
-                for n in names:
-                    if n.lower() in hl:
-                        return i
-            return None
-
-        idx_gps = find_col("Data GPS", "GPS Date", "GPS")
-        idx_sis = find_col("Data Sistema", "Date System", "System Date", "Sistema")
-        idx_modo = find_col("Modo", "Mode", "Status")
-        idx_end = find_col("Endereço", "Endereco", "Address", "Location")
-        idx_ref = find_col("Referência", "Referencia", "Reference")
-        idx_temp = find_col("Temperatura", "Temperature")
-
         rows_data: list[dict] = []
         for row in table.find_elements(By.CSS_SELECTOR, "tbody tr"):
             cells = row.find_elements(By.TAG_NAME, "td")
             if not cells:
                 continue
             texts = [c.text.strip() for c in cells]
-
-            def cell(idx: Optional[int]) -> str:
-                if idx is None or idx >= len(texts):
-                    return ""
-                return texts[idx]
-
             item = {
-                "data_gps": cell(idx_gps) if idx_gps is not None else (texts[0] if texts else ""),
-                "data_sistema": cell(idx_sis) if idx_sis is not None else (texts[1] if len(texts) > 1 else ""),
-                "modo": cell(idx_modo),
-                "endereco": cell(idx_end),
-                "referencia": cell(idx_ref),
-                "temperatura": cell(idx_temp),
+                "data_gps": "",
+                "data_sistema": "",
+                "modo": "",
+                "endereco": "",
+                "referencia": "",
+                "temperatura": "",
                 "raw_cells": texts,
             }
-            if not item["endereco"]:
-                for t in texts:
-                    if re.search(r"(rua|avenida|av\.|rodovia|estrada)", t, re.I):
-                        item["endereco"] = t
-                        break
-            if not item["modo"]:
-                for t in texts:
-                    if re.search(
-                        r"(estacionado|normal|alerta|igni|emerg|parked|in motion|motion)",
-                        t,
-                        re.I,
-                    ):
-                        item["modo"] = t
-                        break
-            if not re.search(r"\d{2}/\d{2}/\d{4}", item.get("data_gps") or ""):
-                for t in texts:
-                    if re.search(r"\d{2}/\d{2}/\d{4}\s+\d{2}:\d{2}", t):
-                        item["data_gps"] = t
-                        break
-            rows_data.append(item)
-
-        logger.info("Posições lidas: %s", len(rows_data))
+            for t in texts:
+                if re.search(r"\d{2}/\d{2}/\d{4}\s+\d{2}:\d{2}", t) and not item["data_gps"]:
+                    item["data_gps"] = t
+                elif re.search(
+                    r"parked|estacionado|normal|in motion|movimento|igni", t, re.I
+                ):
+                    item["modo"] = t
+                elif re.search(r"\([A-Z]{2}\)", t) or re.search(
+                    r"rua|avenida|street", t, re.I
+                ):
+                    item["endereco"] = t
+            if item["data_gps"] or item["endereco"]:
+                rows_data.append(item)
+        logger.info("Posições lidas (selenium): %s", len(rows_data))
         return rows_data
 
     def try_scroll_all(self) -> None:
         d = self._d()
-        for _ in range(8):
-            d.execute_script("window.scrollBy(0, 1200);")
-            self._sleep(0.3)
+        for _ in range(12):
+            try:
+                d.execute_script(
+                    """
+                    var boxes = document.querySelectorAll(
+                      '.dataTables_scrollBody, .ui-datatable-scrollable-body, ' +
+                      '.table-responsive, tbody'
+                    );
+                    for (var i = 0; i < boxes.length; i++) {
+                      try { boxes[i].scrollTop = boxes[i].scrollHeight; } catch(e) {}
+                    }
+                    window.scrollBy(0, 1500);
+                    """
+                )
+            except Exception:
+                d.execute_script("window.scrollBy(0, 1200);")
+            self._sleep(0.25)
 
     def _prepare_historico_filtrado(
         self,
@@ -1902,7 +1995,75 @@ class SitraxBot:
             raise TimeoutException(
                 "Abriu Export mas nao clicou em 'PDF file'. Abra /debug."
             )
-        self._sleep(1.0)
+        # Popup Sitrax EN: "Your download will start in a few seconds." + Ok
+        self._dismiss_download_popup()
+        self._sleep(0.8)
+
+    def _dismiss_download_popup(self) -> None:
+        """Fecha o alerta 'Your download will start in a few seconds' / Ok."""
+        d = self._d()
+        end = time.time() + 12
+        while time.time() < end:
+            try:
+                clicked = d.execute_script(
+                    """
+                    var body = (document.body && document.body.innerText) || '';
+                    var has =
+                      body.indexOf('download will start') >= 0
+                      || body.indexOf('download começ') >= 0
+                      || body.indexOf('download comec') >= 0
+                      || body.indexOf('Seu download') >= 0
+                      || body.indexOf('few seconds') >= 0;
+                    if (!has) return null;
+                    var nodes = document.querySelectorAll('button,a,span,input');
+                    for (var i = 0; i < nodes.length; i++) {
+                      var el = nodes[i];
+                      var t = (el.innerText || el.textContent || el.value || '')
+                        .replace(/\\s+/g,' ').trim();
+                      if (/^(Ok|OK|Oke|Yes|Sim)$/i.test(t)) {
+                        el.click();
+                        return t;
+                      }
+                    }
+                    // botão laranja genérico no modal
+                    var btns = document.querySelectorAll(
+                      '.ui-dialog button, .modal button, [role="dialog"] button'
+                    );
+                    for (var j = 0; j < btns.length; j++) {
+                      if (btns[j].offsetParent !== null) {
+                        btns[j].click();
+                        return 'dialog-btn';
+                      }
+                    }
+                    return null;
+                    """
+                )
+                if clicked:
+                    logger.info("Popup download: clicou %s", clicked)
+                    self._trace(
+                        "download_popup_ok",
+                        f"Fechou alerta de download ({clicked})",
+                        shot=True,
+                    )
+                    self._sleep(0.5)
+                    return
+            except Exception as e:
+                logger.debug("dismiss popup: %s", e)
+            # Selenium fallback
+            for xp in (
+                "//button[normalize-space()='Ok' or normalize-space()='OK']",
+                "//button[contains(.,'Ok') or contains(.,'OK')]",
+                "//*[contains(.,'download will start')]/following::button[1]",
+            ):
+                try:
+                    for el in d.find_elements(By.XPATH, xp):
+                        if el.is_displayed():
+                            d.execute_script("arguments[0].click();", el)
+                            self._trace("download_popup_ok", "Ok (selenium)", shot=True)
+                            return
+                except Exception:
+                    continue
+            self._sleep(0.35)
 
     def _try_save_pdf_from_open_tabs(self, dest: Path) -> Optional[Path]:
         """Se o Sitrax abriu o PDF em nova aba, baixa via URL + cookies da sessao."""
@@ -2006,7 +2167,19 @@ class SitraxBot:
         """Espera PDF na pasta temp OU captura de nova aba."""
         end = time.time() + timeout
         last_partial = False
+        popup_tries = 0
         while time.time() < end:
+            # dialog "Your download will start..." pode bloquear
+            if popup_tries < 6:
+                try:
+                    body = self._d().execute_script(
+                        "return (document.body && document.body.innerText) || '';"
+                    ) or ""
+                    if "download will start" in body.lower() or "few seconds" in body.lower():
+                        self._dismiss_download_popup()
+                        popup_tries += 1
+                except Exception:
+                    pass
             partial = (
                 list(dest.glob("*.crdownload"))
                 + list(dest.glob("*.tmp"))

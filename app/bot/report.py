@@ -46,6 +46,9 @@ IGNITION_ON_HINTS = (
     "normal",
     "movimento",
     "em movimento",
+    "in motion",
+    "ignition on",
+    "ignition on",
 )
 IGNITION_OFF_HINTS = (
     "estacionado",
@@ -53,6 +56,8 @@ IGNITION_OFF_HINTS = (
     "ignição desligada",
     "ignicao desligada",
     "parado",
+    "parked",
+    "ignition off",
 )
 
 
