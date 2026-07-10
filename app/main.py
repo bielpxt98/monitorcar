@@ -186,9 +186,6 @@ async def gerar_pdf(
       - apaga o bruto
     """
     import asyncio
-    import tempfile
-    import shutil
-    from pathlib import Path as P
 
     error = None
     texto = None
@@ -200,17 +197,9 @@ async def gerar_pdf(
         error = "Envie um arquivo .pdf (histórico do Sitrax)."
     else:
         d_ref = parse_date(data)
-        data_ref = d_ref.strftime("%d/%m/%Y") if d_ref else date.today().strftime("%d/%m/%Y")
-
-        def _job():
-            from app.bot.pipeline import TempWorkspace, report_from_sitrax_pdf
-
-            with TempWorkspace(prefix="upload_") as tmp:
-                bruto = tmp / "sitrax_upload.pdf"
-                content = pdf.file.read()  # may not work in thread - read outside
-                return content, tmp, bruto, data_ref
-
-        # lê bytes no event loop, processa em thread com temp
+        data_ref = (
+            d_ref.strftime("%d/%m/%Y") if d_ref else date.today().strftime("%d/%m/%Y")
+        )
         try:
             raw = await pdf.read()
             if len(raw) < 500:
@@ -222,13 +211,12 @@ async def gerar_pdf(
                 with TempWorkspace(prefix="upload_") as tmp:
                     bruto = tmp / "sitrax_upload.pdf"
                     bruto.write_bytes(raw)
-                    result = report_from_sitrax_pdf(
+                    # ao sair do with, o PDF bruto é apagado do servidor
+                    return report_from_sitrax_pdf(
                         bruto,
                         placa=placa.strip() or None,
                         data_ref=data_ref,
                     )
-                    # ao sair do with, bruto é apagado
-                    return result
 
             loop = asyncio.get_event_loop()
             result = await loop.run_in_executor(executor, process)
