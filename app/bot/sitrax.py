@@ -459,60 +459,111 @@ class SitraxBot:
         s = "".join(c for c in s if not unicodedata.combining(c))
         return s.lower()
 
-    def _posicoes_screen_ready(self) -> bool:
-        """Detecta se a tela de Histórico de Posições já abriu (headless-friendly)."""
+    def _page_blob(self) -> str:
+        """Texto visível + page_source (headless às vezes não expõe tudo em .text)."""
         d = self._d()
         try:
             body = d.find_element(By.TAG_NAME, "body").text or ""
         except Exception:
             body = ""
-        bn = self._norm(body)
-
-        # título da tela
-        if "historico de posic" in bn:
-            return True
-
-        # barra de filtros típica dessa tela: Filtros + Data + Filtrar
-        # (e não é o Dashboard de pizza)
-        has_filtros = "filtros" in bn
-        has_data = "data:" in bn or "data :" in bn or re.search(r"\d{2}/\d{2}/\d{4}", body)
-        has_filtrar = "filtrar" in bn
-        is_dashboard = "dashboard" in bn and "ignicao" in bn and "sem conexao" in bn
-
-        if has_filtros and has_filtrar and has_data and not is_dashboard:
-            return True
-
-        # botão Veículo na barra de filtro (não o menu MONITORAMENTO > Veículos)
         try:
-            for el in d.find_elements(
-                By.XPATH,
-                "//*[normalize-space()='Veículo' or normalize-space()='Veiculo']",
-            ):
-                if el.is_displayed() and (has_filtros or has_filtrar):
-                    return True
+            src = d.page_source or ""
         except Exception:
-            pass
+            src = ""
+        return body + "\n" + src
 
-        # item de menu marcado como clicado
+    def _posicoes_screen_ready(self) -> bool:
+        """Detecta tela de Posições (texto, HTML e IDs do Sitrax)."""
+        d = self._d()
+        blob = self._norm(self._page_blob())
+
+        # marcadores fortes no HTML/texto
+        strong = [
+            "historico de posic",
+            "historico de posicoes",
+            "relatorioposicao",
+            "idfiltrocveiplaca",  # id do filtro de placa (só existe no fluxo de posições/modal)
+            "formmodalsearchveiculo",
+            "sbrelatorioposicao",
+        ]
+        # idFiltroCveiPlaca só no modal de veículo — mas "Filtrar" + chip Data é da tela
+        if "historico de posic" in blob:
+            return True
+
+        # menu item marcado
         try:
             el = d.find_element(By.ID, "formTemplate:sbRelatorioPosicao")
-            cls = el.get_attribute("class") or ""
-            if "Clicked" in cls or "clicked" in cls:
-                # menu marcado — espera conteúdo
-                if has_filtros or "posic" in bn:
-                    return True
+            cls = (el.get_attribute("class") or "").lower()
+            if "clicked" in cls:
+                # se saiu do dashboard de pizzas
+                if "sem conexao" not in blob or "filtrar" in blob:
+                    if "filtrar" in blob or "filtros" in blob:
+                        return True
         except Exception:
             pass
+
+        has_filtros = "filtros" in blob
+        has_filtrar = "filtrar" in blob
+        has_veiculo_chip = (
+            "veiculo" in blob or "veículo" in self._page_blob().lower()
+        )
+        # barra: Filtros | Veículo | Data | Filtrar
+        if has_filtros and has_filtrar and has_veiculo_chip:
+            # evita dashboard: pizzas de ignição
+            if "ignicao" in blob and "sem conexao" in blob and "ocorrencias" in blob:
+                if "historico" not in blob and "data:" not in blob:
+                    return False
+            return True
+
+        # elementos DOM específicos
+        for css in (
+            "#itFiltroCveiPlaca",
+            "input[id='formModalSearchVeiculo:itCveiPlaca']",
+        ):
+            try:
+                if d.find_elements(By.CSS_SELECTOR, css):
+                    # modal de veículo aberto implica que já estamos em posições
+                    return True
+            except Exception:
+                pass
+
+        for xp in (
+            "//*[contains(.,'Histórico de Posições') or contains(.,'Historico de Posicoes')]",
+            "//*[normalize-space()='Filtros']",
+            "//button[contains(.,'Filtrar')]",
+        ):
+            try:
+                els = d.find_elements(By.XPATH, xp)
+                if any(e.is_displayed() for e in els):
+                    if "filtrar" in blob or "filtros" in blob:
+                        return True
+            except Exception:
+                continue
 
         return False
 
     def _jsf_click_posicoes(self) -> bool:
-        """Navega via JSF/Mojarra (mais confiável no headless que click visual)."""
+        """Navega via JSF/Mojarra + força visibilidade do item no menu."""
         d = self._d()
         try:
             ok = d.execute_script(
                 """
                 try {
+                  // força sidebar e item visíveis
+                  var m = document.getElementById('sidebar-menu');
+                  if (m) {
+                    m.classList.remove('-translate-x-full');
+                    m.style.transform = 'translateX(0px)';
+                    m.style.visibility = 'visible';
+                    m.style.display = 'block';
+                    m.style.opacity = '1';
+                  }
+                  var el = document.getElementById('formTemplate:sbRelatorioPosicao');
+                  if (el) {
+                    el.style.display = 'block';
+                    el.style.visibility = 'visible';
+                    el.removeAttribute('disabled');
+                  }
                   var form = document.getElementById('formTemplate');
                   if (form && typeof mojarra !== 'undefined' && mojarra.jsfcljs) {
                     mojarra.jsfcljs(form, {
@@ -520,23 +571,26 @@ class SitraxBot:
                     }, '');
                     return 'mojarra';
                   }
-                  var el = document.getElementById('formTemplate:sbRelatorioPosicao');
                   if (el) {
-                    if (typeof jsf !== 'undefined' && jsf.util && jsf.util.chain) {
-                      el.click();
-                      return 'click';
-                    }
                     el.click();
                     return 'click';
                   }
+                  // procura por texto Posições
+                  var links = document.querySelectorAll('a.swNavBarContentButton');
+                  for (var i=0;i<links.length;i++) {
+                    if ((links[i].textContent||'').indexOf('Posi') >= 0) {
+                      links[i].click();
+                      return 'text';
+                    }
+                  }
                   return false;
                 } catch (e) {
-                  return 'err:' + e;
+                  return 'err:' + String(e);
                 }
                 """
             )
             logger.info("JSF navigate Posições: %s", ok)
-            return bool(ok) and not str(ok).startswith("err")
+            return bool(ok) and not str(ok).startswith("err") and ok is not False
         except Exception as e:
             logger.warning("JSF navigate falhou: %s", e)
             return False
@@ -556,30 +610,14 @@ class SitraxBot:
             self._open_side_menu()
             self._sleep(0.8)
 
-            # Expandir HISTÓRICOS
             try:
                 btn_hist = d.find_element(By.ID, "btnHistorico")
                 d.execute_script("arguments[0].click();", btn_hist)
-                self._sleep(0.5)
+                self._sleep(0.6)
             except Exception:
-                self._click_by_text(["HISTÓRICOS", "Históricos", "Historicos"], timeout=3)
-
-            # Garante item no DOM (mesmo off-screen)
-            try:
-                d.execute_script(
-                    """
-                    var m = document.getElementById('sidebar-menu');
-                    if (m) {
-                      m.classList.remove('-translate-x-full');
-                      m.style.transform = 'translateX(0)';
-                      m.style.visibility = 'visible';
-                      m.style.display = 'block';
-                    }
-                    """
+                self._click_by_text(
+                    ["HISTÓRICOS", "Históricos", "Historicos"], timeout=3
                 )
-            except Exception:
-                pass
-            self._sleep(0.3)
 
             ok = self._jsf_click_posicoes()
             if not ok:
@@ -590,12 +628,12 @@ class SitraxBot:
             if not ok:
                 last_err = "botão Posições não encontrado"
                 self._save_debug(f"posicoes_id_tentativa_{attempt}")
-                self._sleep(1)
+                self._sleep(1.5)
                 continue
 
-            # JSF postback / AJAX — espera mais no Railway
-            self._sleep(2)
-            self._wait_loader_gone(50)
+            # postback JSF
+            self._sleep(3)
+            self._wait_loader_gone(60)
             self._sleep(2)
 
             try:
@@ -605,27 +643,41 @@ class SitraxBot:
             except Exception:
                 pass
 
-            for _ in range(20):
+            for _ in range(25):
                 if self._posicoes_screen_ready():
                     logger.info("Tela de Posições aberta")
                     self._save_debug("posicoes_ok")
                     return
-                self._sleep(0.6)
+                self._sleep(0.5)
 
-            last_err = "tela não confirmada após clique"
-            self._save_debug(f"posicoes_nao_confirmada_{attempt}")
-            # tenta reload da welcome e de novo
+            # fallback otimista: se o menu ficou "Clicked", tenta seguir o fluxo
             try:
-                if "welcome" in d.current_url or "secure" in d.current_url:
-                    d.refresh()
-                    self._sleep(3)
+                el = d.find_element(By.ID, "formTemplate:sbRelatorioPosicao")
+                cls = el.get_attribute("class") or ""
+                if "Clicked" in cls or "clicked" in cls:
+                    logger.warning(
+                        "Menu Posições marcado como clicado; seguindo mesmo sem título visível"
+                    )
+                    self._save_debug("posicoes_optimistic")
+                    return
             except Exception:
                 pass
 
-        raise TimeoutException(
-            f"Clicou em Posições mas a tela não abriu ({last_err}). "
-            f"Veja {DEBUG_DIR}"
+            last_err = "tela não confirmada após clique"
+            self._save_debug(f"posicoes_nao_confirmada_{attempt}")
+            try:
+                d.refresh()
+                self._sleep(4)
+            except Exception:
+                pass
+
+        # última chance: segue e deixa open_vehicle_selector validar
+        logger.warning(
+            "Não confirmei Posições (%s); tentando continuar o fluxo mesmo assim",
+            last_err,
         )
+        self._save_debug("posicoes_force_continue")
+        # não levanta erro aqui — se estiver errado, falha no botão Veículo com mensagem clara
 
     def _close_date_popup_if_open(self) -> None:
         """Fecha o popup 'Filtro Data' se estiver aberto (evita clicar errado)."""
@@ -1385,9 +1437,18 @@ class SitraxBot:
         data_fim: Optional[date] = None,
     ) -> None:
         """Abre Posições, escolhe veículo, data e filtra (lista pronta na tela)."""
+        self._sleep(2)  # dashboard JSF estabilizar (Railway)
         self.open_posicoes()
+        self._sleep(1)
         self._close_date_popup_if_open()
-        self.open_vehicle_selector()
+        try:
+            self.open_vehicle_selector()
+        except TimeoutException:
+            # se open_posicoes seguiu otimista, tenta reabrir Posições 1x
+            logger.warning("Veículo não achado; reabrindo Posições…")
+            self.open_posicoes()
+            self._sleep(1)
+            self.open_vehicle_selector()
         self.load_vehicle_list(placa=placa)
         self.select_vehicle_by_plate(placa)
         self.set_date_filter(data_ini, data_fim)
