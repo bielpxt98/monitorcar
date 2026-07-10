@@ -105,9 +105,13 @@ class SitraxBot:
         opts.add_argument("--disable-popup-blocking")
         opts.add_argument("--renderer-process-limit=1")
         opts.add_argument("--js-flags=--max-old-space-size=256")
-        opts.add_argument("--user-data-dir=/tmp/chrome-user-data")
-        opts.add_argument("--data-path=/tmp/chrome-user-data")
-        opts.add_argument("--disk-cache-dir=/tmp/chrome-cache")
+        # perfil/cache em temp (Docker/Railway e Windows)
+        import tempfile as _tmpmod
+
+        _chrome_tmp = Path(_tmpmod.gettempdir()) / "sitrax-chrome"
+        _chrome_tmp.mkdir(parents=True, exist_ok=True)
+        opts.add_argument(f"--user-data-dir={_chrome_tmp / 'user-data'}")
+        opts.add_argument(f"--disk-cache-dir={_chrome_tmp / 'cache'}")
         # evita popups "Salvar senha?" / "Usar chave de acesso?" do Chrome
         opts.add_experimental_option(
             "excludeSwitches", ["enable-automation", "enable-logging"]
