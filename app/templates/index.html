@@ -112,10 +112,21 @@
         O servidor entra no Sitrax, escolhe a placa, baixa o histórico, monta o resumo e apaga os arquivos brutos.
       </p>
       <form method="post" action="/gerar" id="form-auto">
-        <label for="placa">Placa</label>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:.65rem;margin-bottom:.9rem">
+          <label class="mode" style="display:block;border:1px solid var(--border);border-radius:12px;padding:.75rem;cursor:pointer">
+            <input type="radio" name="modo" value="placa" {% if not modo or modo == 'placa' %}checked{% endif %} />
+            <strong>1 veículo</strong>
+          </label>
+          <label class="mode" style="display:block;border:1px solid var(--border);border-radius:12px;padding:.75rem;cursor:pointer">
+            <input type="radio" name="modo" value="todos" {% if modo == 'todos' %}checked{% endif %} />
+            <strong>Todos</strong>
+          </label>
+        </div>
+
+        <label for="placa">Placa (só se for 1 veículo)</label>
         <input id="placa" name="placa" type="text" placeholder="Ex: PCE7B03"
-               value="{{ placa or '' }}" style="text-transform:uppercase" required />
-        <input type="hidden" name="modo" value="placa" />
+               value="{{ placa or '' }}" style="text-transform:uppercase" />
+
         <div style="display:grid;grid-template-columns:1fr 1fr;gap:.65rem">
           <div>
             <label for="data_ini">Data início</label>
@@ -127,6 +138,11 @@
           </div>
         </div>
         <button type="submit" class="btn-primary" id="btn-auto">Gerar resumo automático</button>
+        <p class="hint">
+          <strong>1 veículo:</strong> 1 PDF de resumo dessa placa.<br/>
+          <strong>Todos:</strong> o servidor percorre a frota e monta <strong>1 PDF único</strong> com o resumo de cada carro (pode demorar vários minutos).
+          O relatório aparece nesta mesma tela para você baixar — não vai por e-mail nem WhatsApp.
+        </p>
       </form>
       <p class="hint">
         <a href="/debug" style="color:#fb923c">Painel de calibração →</a>

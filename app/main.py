@@ -269,7 +269,7 @@ async def gerar(
     if not sitrax_configured():
         error = "Servidor sem credenciais Sitrax (.env). Contate o administrador."
     elif modo == "placa" and not placa.strip():
-        error = "Informe a placa do veículo."
+        error = "Informe a placa do veículo (ou escolha Todos)."
     else:
         d_ini = parse_date(data_ini) or date.today()
         d_fim = parse_date(data_fim) or d_ini

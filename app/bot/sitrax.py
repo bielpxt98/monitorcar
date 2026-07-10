@@ -1722,7 +1722,74 @@ class SitraxBot:
                 "Não achei o botão de download (nuvem) do histórico. "
                 "Abra /debug."
             )
-        self._sleep(1)
+        self._sleep(0.8)
+
+        # Menu "Export" → clicar em "PDF file" (calibração mostrou esse dropdown)
+        pdf_clicked = False
+        try:
+            res2 = d.execute_script(
+                """
+                function clickByText(texts) {
+                  var nodes = document.querySelectorAll('a,button,span,div,li,label');
+                  for (var i = 0; i < nodes.length; i++) {
+                    var t = (nodes[i].innerText || nodes[i].textContent || '').replace(/\\s+/g,' ').trim();
+                    for (var j = 0; j < texts.length; j++) {
+                      if (t === texts[j] || t.indexOf(texts[j]) === 0) {
+                        nodes[i].click();
+                        return t;
+                      }
+                    }
+                  }
+                  return null;
+                }
+                // prioridade: PDF file (EN) / Arquivo PDF (PT)
+                return clickByText([
+                  'PDF file', 'PDF File', 'Pdf file',
+                  'Arquivo PDF', 'Arquivo pdf', 'PDF',
+                  'Export PDF', 'Exportar PDF'
+                ]);
+                """
+            )
+            if res2:
+                pdf_clicked = True
+                logger.info("Clicou item do menu Export: %s", res2)
+                self._trace("download_pdf_menu", f"Menu Export → {res2}")
+        except Exception as e:
+            logger.warning("Menu PDF: %s", e)
+
+        if not pdf_clicked:
+            # Selenium fallback
+            for xp in (
+                "//*[normalize-space()='PDF file' or normalize-space()='PDF File']",
+                "//*[contains(normalize-space(.),'PDF file')]",
+                "//*[contains(normalize-space(.),'Arquivo PDF')]",
+                "//a[contains(.,'PDF')]|//button[contains(.,'PDF')]|//span[contains(.,'PDF')]",
+            ):
+                try:
+                    for el in d.find_elements(By.XPATH, xp):
+                        t = (el.text or "").strip()
+                        if "XLS" in t or "xls" in t.lower():
+                            continue
+                        if "PDF" not in t.upper():
+                            continue
+                        d.execute_script("arguments[0].click();", el)
+                        pdf_clicked = True
+                        self._trace("download_pdf_menu", f"Fallback: {t}")
+                        break
+                except Exception:
+                    continue
+                if pdf_clicked:
+                    break
+
+        if not pdf_clicked:
+            self._save_debug(
+                "download_menu_pdf_nao_clicado",
+                "Abriu a nuvem/Export mas não clicou em 'PDF file'",
+                ok=False,
+            )
+            # não aborta ainda — às vezes o clique na nuvem já inicia download
+            logger.warning("Não clicou em PDF file no menu; aguardando download mesmo assim")
+        self._sleep(1.2)
 
     def download_historico_pdf(
         self,
