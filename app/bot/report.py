@@ -81,14 +81,21 @@ def parse_dt(value: str) -> Optional[datetime]:
 def extract_city(endereco: str, referencia: str = "") -> str:
     """Tenta extrair cidade do endereço/referência do Sitrax."""
     text = f"{endereco} {referencia}".strip()
-    if not text:
+    if not text or re.search(r"local\s+desconhecido", text, re.I):
         return "Local desconhecido"
 
-    # Padrões comuns: "Cidade (UF)" ou final do endereço
+    # "Cidade (UF)" no fim ou no meio
     m = re.search(
-        r"[-–]\s*([A-Za-zÀ-ú\s]+?)\s*\(([A-Z]{2})\)\s*$",
+        r"[-–,]?\s*([A-Za-zÀ-ú][A-Za-zÀ-ú\s]{1,40}?)\s*\(([A-Z]{2})\)\s*$",
         text,
         re.IGNORECASE,
+    )
+    if m:
+        return m.group(1).strip().title()
+
+    m = re.search(
+        r"\b([A-Za-zÀ-ú][A-Za-zÀ-ú\s]{1,40}?)\s*\(([A-Z]{2})\)",
+        text,
     )
     if m:
         return m.group(1).strip().title()
@@ -97,43 +104,60 @@ def extract_city(endereco: str, referencia: str = "") -> str:
     if m:
         return m.group(1).strip().title()
 
-    # Cidades da Grande Recife (fallback por palavra-chave)
+    # Cidades da Grande Recife / PE (mais longas primeiro)
     cities = [
-        "Recife",
-        "Olinda",
-        "Paulista",
-        "Abreu e Lima",
-        "Igarassu",
-        "Camaragibe",
-        "Jaboatão",
-        "Jaboatao",
+        "Jaboatão dos Guararapes",
+        "Jaboatao dos Guararapes",
         "São Lourenço da Mata",
         "Sao Lourenco da Mata",
-        "Moreno",
         "Cabo de Santo Agostinho",
-        "Ipojuca",
-        "Goiana",
+        "Vitória de Santo Antão",
+        "Vitoria de Santo Antao",
+        "Abreu e Lima",
+        "Camaragibe",
+        "Igarassu",
         "Itamaracá",
         "Itamaraca",
         "Araçoiaba",
         "Aracoiaba",
+        "Paulista",
+        "Recife",
+        "Olinda",
+        "Moreno",
+        "Ipojuca",
+        "Goiana",
         "Paudalho",
         "Caruaru",
         "Petrolina",
+        "Jaboatão",
+        "Jaboatao",
+        "Escada",
+        "Gravatá",
+        "Carpina",
+        "Limoeiro",
     ]
     lower = text.lower()
     for city in cities:
         if city.lower() in lower:
-            return city.replace("Jaboatao", "Jaboatão").replace(
-                "Sao Lourenco da Mata", "São Lourenço da Mata"
-            ).replace("Itamaraca", "Itamaracá").replace("Aracoiaba", "Araçoiaba")
+            return (
+                city.replace("Jaboatao dos Guararapes", "Jaboatão dos Guararapes")
+                .replace("Jaboatao", "Jaboatão dos Guararapes")
+                .replace("Jaboatão", "Jaboatão dos Guararapes")
+                if "jaboat" in city.lower() and "guararapes" not in city.lower()
+                else city.replace("Jaboatao dos Guararapes", "Jaboatão dos Guararapes")
+                .replace("Sao Lourenco da Mata", "São Lourenço da Mata")
+                .replace("Vitoria de Santo Antao", "Vitória de Santo Antão")
+                .replace("Itamaraca", "Itamaracá")
+                .replace("Aracoiaba", "Araçoiaba")
+            )
 
-    # Último segmento do endereço
-    parts = re.split(r"[-–,]", endereco)
+    # Último segmento do endereço (após hífen)
+    parts = re.split(r"[-–]", endereco)
     if parts:
         last = parts[-1].strip()
         last = re.sub(r"\s*\([A-Z]{2}\)\s*", "", last).strip()
-        if 2 < len(last) < 40:
+        last = re.sub(r",\s*[A-Z]{2}\s*$", "", last).strip()
+        if 2 < len(last) < 40 and not re.search(r"\d{2}/\d{2}", last):
             return last.title()
 
     return "Local desconhecido"

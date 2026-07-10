@@ -159,20 +159,56 @@ def generate_vehicle_report_cloud(
                         ok=True,
                         screenshot=False,
                     )
-                    result = report_from_sitrax_pdf(
-                        pdf_bruto, placa=placa, data_ref=data_ref
+                    _, pdf_positions = positions_from_pdf(pdf_bruto)
+                    n_city = sum(
+                        1
+                        for p in pdf_positions
+                        if p.cidade
+                        and "desconhecido" not in p.cidade.lower()
                     )
                     debug_session.step(
                         "pdf_parse",
-                        f"{result.pontos} ponto(s) extraídos do PDF",
-                        ok=result.pontos > 0,
+                        f"{len(pdf_positions)} ponto(s); {n_city} com cidade",
+                        ok=len(pdf_positions) > 0 and n_city > 0,
                         screenshot=False,
                     )
-                    # PDF baixou mas parser não entendeu (ex.: layout EN) → tabela
-                    if result.pontos == 0:
-                        logger.warning(
-                            "PDF com 0 posições parseadas; caindo para scrape da tabela"
+                    if pdf_positions and n_city > 0:
+                        result = report_from_positions(
+                            placa, pdf_positions, data_ref=data_ref
                         )
+                    elif pdf_positions and n_city == 0:
+                        logger.warning(
+                            "PDF: %s pontos sem cidade — tenta tabela",
+                            len(pdf_positions),
+                        )
+                        # guarda horários do PDF; se tabela falhar, ainda devolve algo
+                        result = report_from_positions(
+                            placa, pdf_positions, data_ref=data_ref
+                        )
+                        try:
+                            bot.try_scroll_all()
+                            rows = bot.scrape_positions_table()
+                            from_table = positions_from_rows(rows)
+                            table_city = sum(
+                                1
+                                for p in from_table
+                                if p.cidade
+                                and "desconhecido" not in p.cidade.lower()
+                            )
+                            debug_session.step(
+                                "scrape_enriquecer",
+                                f"tabela: {len(from_table)} pts, {table_city} com cidade",
+                                ok=table_city > 0,
+                                screenshot=False,
+                            )
+                            if table_city > 0:
+                                result = report_from_positions(
+                                    placa, from_table, data_ref=data_ref
+                                )
+                        except Exception as e:
+                            logger.warning("Enriquecer via tabela: %s", e)
+                    else:
+                        logger.warning("PDF com 0 posições; caindo para scrape")
                         result = None
 
                 if result is None:
