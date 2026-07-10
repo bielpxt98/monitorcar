@@ -370,3 +370,61 @@ async def health():
         "configured": sitrax_configured(),
         "mode": "cloud-summary-only",
     }
+
+
+@app.get("/debug", response_class=HTMLResponse)
+async def debug_panel(request: Request):
+    """Painel de calibração: última execução do robô com fotos de cada passo."""
+    from app.bot.debug_session import get_last_run
+
+    run = get_last_run()
+    return templates.TemplateResponse(
+        request,
+        "debug.html",
+        {
+            "run": run,
+            "configured": sitrax_configured(),
+        },
+    )
+
+
+@app.post("/calibrar", response_class=HTMLResponse)
+async def calibrar(request: Request):
+    """
+    Roda o robô só até abrir o modal de veículos (sem gerar relatório).
+    Serve para calibrar cliques olhando /debug.
+    """
+    import asyncio
+
+    if not sitrax_configured():
+        return RedirectResponse(url="/debug", status_code=303)
+
+    def job():
+        from app.bot import debug_session
+        from app.bot.sitrax import SitraxBot
+        from app.bot.pipeline import TempWorkspace
+
+        debug_session.start_run(placa="CALIBRAGEM")
+        try:
+            with TempWorkspace(prefix="calib_") as tmp:
+                with SitraxBot(headless=True, download_dir=tmp) as bot:
+                    bot.login()
+                    bot.open_posicoes()
+                    bot.open_vehicle_selector()
+                    bot.load_vehicle_list(placa="PCE7B03")
+                    bot._trace(
+                        "calibragem_ok",
+                        "Chegou no modal de veículos — calibração parcial OK",
+                    )
+            debug_session.finish_run(ok=True)
+        except Exception as e:
+            debug_session.finish_run(ok=False, error=str(e))
+            raise
+
+    loop = asyncio.get_event_loop()
+    try:
+        await loop.run_in_executor(executor, job)
+    except Exception as e:
+        logger.exception("Calibragem falhou: %s", e)
+
+    return RedirectResponse(url="/debug", status_code=303)

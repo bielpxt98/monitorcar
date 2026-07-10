@@ -121,31 +121,57 @@ def generate_vehicle_report_cloud(
     if data_fim != data_ini:
         data_ref += f" a {data_fim.strftime('%d/%m/%Y')}"
 
-    with TempWorkspace(prefix=f"sitrax_{placa}_") as tmp:
-        # Chrome baixa PDF BRUTO só em tmp (nunca no celular)
-        with SitraxBot(headless=headless, download_dir=tmp) as bot:
-            bot.login()
-            # Caminho principal: baixar PDF do Sitrax (mesmo do botão nuvem)
-            # → parse → resumo. Fallback: scrape da tabela se download falhar.
-            pdf_bruto = None
-            try:
-                pdf_bruto = bot.download_historico_pdf(
-                    placa, data_ini=data_ini, data_fim=data_fim, dest_dir=tmp
-                )
-            except Exception as e:
-                logger.warning("Download PDF Sitrax falhou: %s", e)
+    from app.bot import debug_session
 
-            if pdf_bruto and Path(pdf_bruto).exists():
-                logger.info("Usando PDF baixado: %s (%s bytes)", pdf_bruto, Path(pdf_bruto).stat().st_size)
-                result = report_from_sitrax_pdf(
-                    pdf_bruto, placa=placa, data_ref=data_ref
-                )
-            else:
-                logger.warning("Sem PDF bruto; tentando scrape da tabela")
-                positions = bot.get_positions_for_plate(
-                    placa, data_ini=data_ini, data_fim=data_fim, already_on_posicoes=False
-                )
-                result = report_from_positions(placa, positions, data_ref=data_ref)
+    debug_session.start_run(placa=placa)
+    try:
+        with TempWorkspace(prefix=f"sitrax_{placa}_") as tmp:
+            # Chrome baixa PDF BRUTO só em tmp (nunca no celular)
+            with SitraxBot(headless=headless, download_dir=tmp) as bot:
+                bot.login()
+                # Caminho principal: baixar PDF do Sitrax (mesmo do botão nuvem)
+                # → parse → resumo. Fallback: scrape da tabela se download falhar.
+                pdf_bruto = None
+                try:
+                    pdf_bruto = bot.download_historico_pdf(
+                        placa, data_ini=data_ini, data_fim=data_fim, dest_dir=tmp
+                    )
+                except Exception as e:
+                    logger.warning("Download PDF Sitrax falhou: %s", e)
+                    debug_session.step(
+                        "download_falhou", str(e), ok=False, screenshot=False
+                    )
 
-        # tmp (e PDF bruto) APAGADOS aqui — só result.pdf_bytes (resumo) sai
+                if pdf_bruto and Path(pdf_bruto).exists():
+                    logger.info(
+                        "Usando PDF baixado: %s (%s bytes)",
+                        pdf_bruto,
+                        Path(pdf_bruto).stat().st_size,
+                    )
+                    debug_session.step(
+                        "pdf_baixado",
+                        f"{pdf_bruto.name} ({Path(pdf_bruto).stat().st_size} bytes)",
+                        ok=True,
+                        screenshot=False,
+                    )
+                    result = report_from_sitrax_pdf(
+                        pdf_bruto, placa=placa, data_ref=data_ref
+                    )
+                else:
+                    logger.warning("Sem PDF bruto; tentando scrape da tabela")
+                    positions = bot.get_positions_for_plate(
+                        placa,
+                        data_ini=data_ini,
+                        data_fim=data_fim,
+                        already_on_posicoes=False,
+                    )
+                    result = report_from_positions(
+                        placa, positions, data_ref=data_ref
+                    )
+
+            # tmp (e PDF bruto) APAGADOS aqui — só result.pdf_bytes (resumo) sai
+        debug_session.finish_run(ok=True)
         return result
+    except Exception as e:
+        debug_session.finish_run(ok=False, error=str(e))
+        raise

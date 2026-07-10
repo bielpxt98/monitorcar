@@ -1,0 +1,106 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Calibração do robô</title>
+  <style>
+    :root {
+      --bg: #0f1221; --card: #1a1f35; --text: #f3f4f6; --muted: #9ca3af;
+      --ok: #22c55e; --err: #ef4444; --border: #2d3548; --accent: #ff6b00;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0; font-family: system-ui, sans-serif; background: var(--bg);
+      color: var(--text); padding: 1rem; line-height: 1.45;
+    }
+    .wrap { max-width: 900px; margin: 0 auto; }
+    a { color: #fb923c; }
+    h1 { font-size: 1.3rem; margin: 0 0 .5rem; }
+    .nav { margin-bottom: 1rem; font-size: .9rem; }
+    .card {
+      background: var(--card); border: 1px solid var(--border);
+      border-radius: 14px; padding: 1rem; margin-bottom: 1rem;
+    }
+    .status-ok { color: var(--ok); }
+    .status-err { color: var(--err); }
+    .status-run { color: #fbbf24; }
+    .step {
+      border-left: 3px solid var(--border); padding: .75rem 0 .75rem 1rem;
+      margin: .75rem 0;
+    }
+    .step.fail { border-left-color: var(--err); }
+    .step.ok { border-left-color: var(--ok); }
+    .meta { font-size: .8rem; color: var(--muted); word-break: break-all; }
+    .step img {
+      max-width: 100%; border-radius: 10px; border: 1px solid var(--border);
+      margin-top: .5rem; display: block;
+    }
+    form button {
+      background: linear-gradient(90deg, var(--accent), #ff8c33);
+      border: 0; color: #fff; font-weight: 700; padding: .85rem 1.2rem;
+      border-radius: 12px; cursor: pointer; font-size: 1rem; width: 100%;
+    }
+    .hint { font-size: .85rem; color: var(--muted); }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="nav">
+      <a href="/">← Voltar ao resumo</a>
+    </div>
+    <h1>Monitor / calibração do robô</h1>
+    <p class="hint">
+      Cada execução automática grava passos com <strong>foto da tela</strong> que o Chrome viu no servidor.
+      Use isso para calibrar cliques (login, menu, Posições, Veículo, download).
+    </p>
+
+    <div class="card">
+      <form method="post" action="/calibrar" onsubmit="this.querySelector('button').disabled=true; this.querySelector('button').textContent='Rodando… aguarde 1–3 min';">
+        <button type="submit">Rodar calibração (login → Posições → Veículo)</button>
+      </form>
+      <p class="hint" style="margin-top:.75rem;margin-bottom:0">
+        Não gera relatório. Só navega e tira fotos. Depois a página recarrega com os passos.
+      </p>
+    </div>
+
+    {% if not run %}
+    <div class="card">
+      <p>Nenhuma execução ainda. Rode a calibração ou um “Tentar automático” na home.</p>
+    </div>
+    {% else %}
+    <div class="card">
+      <p>
+        <strong>Início:</strong> {{ run.started }}
+        {% if run.finished %} · <strong>Fim:</strong> {{ run.finished }}{% endif %}
+        {% if run.placa %} · <strong>Placa:</strong> {{ run.placa }}{% endif %}
+      </p>
+      <p>
+        Status:
+        {% if run.status == 'ok' %}<span class="status-ok">OK</span>
+        {% elif run.status == 'error' %}<span class="status-err">ERRO</span>
+        {% else %}<span class="status-run">em andamento</span>{% endif %}
+      </p>
+      {% if run.error %}
+      <pre style="white-space:pre-wrap;color:#fecaca;font-size:.85rem">{{ run.error }}</pre>
+      {% endif %}
+      <p class="hint">{{ run.steps|length }} passo(s) gravados</p>
+    </div>
+
+    {% for s in run.steps %}
+    <div class="card step {% if s.ok %}ok{% else %}fail{% endif %}">
+      <div><strong>{{ s.t }}</strong> — {{ s.name }}</div>
+      {% if s.message %}<div>{{ s.message }}</div>{% endif %}
+      <div class="meta">
+        {% if s.title %}Título: {{ s.title }} · {% endif %}
+        {% if s.url %}{{ s.url }}{% endif %}
+      </div>
+      {% if s.image_b64 %}
+      <img src="data:image/png;base64,{{ s.image_b64 }}" alt="{{ s.name }}" loading="lazy" />
+      {% endif %}
+    </div>
+    {% endfor %}
+    {% endif %}
+  </div>
+</body>
+</html>

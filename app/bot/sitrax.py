@@ -26,6 +26,7 @@ from webdriver_manager.chrome import ChromeDriverManager
 
 from app.config import settings
 from app.bot.report import Position, positions_from_rows
+from app.bot import debug_session
 
 logger = logging.getLogger(__name__)
 DEBUG_DIR = Path(__file__).resolve().parents[2] / "debug"
@@ -198,8 +199,8 @@ class SitraxBot:
             except Exception:
                 ActionChains(d).move_to_element(element).click().perform()
 
-    def _save_debug(self, label: str) -> Path:
-        """Salva screenshot + HTML para depurar falhas."""
+    def _save_debug(self, label: str, message: str = "", ok: bool = True) -> Path:
+        """Salva screenshot + HTML e registra no painel de calibração."""
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
         safe = re.sub(r"[^a-zA-Z0-9_-]+", "_", label)[:40]
         png = DEBUG_DIR / f"{ts}_{safe}.png"
@@ -210,7 +211,32 @@ class SitraxBot:
             logger.info("Debug salvo: %s | %s | URL=%s", png, html, self._d().current_url)
         except Exception as e:
             logger.warning("Falha ao salvar debug: %s", e)
+        # painel /debug (memória)
+        try:
+            debug_session.step(
+                label,
+                message or label,
+                driver=self._d() if self.driver else None,
+                ok=ok,
+                screenshot=True,
+                html=False,
+            )
+        except Exception:
+            pass
         return png
+
+    def _trace(self, name: str, message: str = "", ok: bool = True, shot: bool = True) -> None:
+        """Passo leve para o painel de calibração."""
+        try:
+            debug_session.step(
+                name,
+                message,
+                driver=self._d() if self.driver else None,
+                ok=ok,
+                screenshot=shot,
+            )
+        except Exception:
+            pass
 
     def _find_first(self, selectors: list[tuple[str, str]], timeout: float = 15):
         end = time.time() + timeout
@@ -273,8 +299,10 @@ class SitraxBot:
     def login(self) -> None:
         d = self._d()
         logger.info("Abrindo login: %s", self.login_url)
+        self._trace("login_abrir", f"Abrindo {self.login_url}")
         d.get(self.login_url)
         self._sleep(1.5)
+        self._trace("login_form", "Formulário de login carregado")
 
         # 3 campos: Cliente, Usuário, Senha
         inputs = d.find_elements(By.CSS_SELECTOR, "input:not([type='hidden'])")
@@ -340,14 +368,14 @@ class SitraxBot:
                 or "secure" in drv.current_url.lower()
             )
         except TimeoutException:
-            self._save_debug("login_falhou")
+            self._save_debug("login_falhou", "Login não concluiu", ok=False)
             raise TimeoutException(
                 "Login não concluiu. Confira cliente/usuário/senha no .env"
             )
         # dashboard demora a carregar menus
         self._sleep(3)
         logger.info("Login ok: %s", d.current_url)
-        self._save_debug("apos_login")
+        self._save_debug("apos_login", f"Login OK — {d.current_url}")
 
     def _js_click_id(self, element_id: str) -> bool:
         """Clica por id (funciona mesmo se o item estiver no menu lateral off-screen)."""
@@ -599,14 +627,17 @@ class SitraxBot:
         """Navega para Históricos → Posições (JSF: formTemplate:sbRelatorioPosicao)."""
         d = self._d()
         self._sleep(2)
+        self._trace("posicoes_inicio", "Iniciando navegação para Posições")
 
         if self._posicoes_screen_ready():
             logger.info("Já está na tela de Posições")
+            self._trace("posicoes_ja_aberta", "Já estava em Posições")
             return
 
         last_err = None
         for attempt in range(3):
             logger.info("Abrindo Posições (tentativa %s/3)", attempt + 1)
+            self._trace("posicoes_tentativa", f"Tentativa {attempt + 1}/3")
             self._open_side_menu()
             self._sleep(0.8)
 
@@ -646,7 +677,7 @@ class SitraxBot:
             for _ in range(25):
                 if self._posicoes_screen_ready():
                     logger.info("Tela de Posições aberta")
-                    self._save_debug("posicoes_ok")
+                    self._save_debug("posicoes_ok", "Histórico de Posições confirmado")
                     return
                 self._sleep(0.5)
 
@@ -786,10 +817,14 @@ class SitraxBot:
                     continue
 
         if not clicked:
-            self._save_debug("veiculo_botao_nao_encontrado")
+            self._save_debug(
+                "veiculo_botao_nao_encontrado",
+                "Botão Veículo NÃO encontrado — veja a foto no painel /debug",
+                ok=False,
+            )
             raise TimeoutException(
                 "Não encontrou o botão 'Veículo' na barra de filtros. "
-                f"Veja {DEBUG_DIR}"
+                "Abra /debug para ver a tela que o robô enxergou."
             )
 
         self._wait_loader_gone(25)
