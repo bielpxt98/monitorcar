@@ -53,7 +53,7 @@
       font-size: .75rem; padding: .2rem .6rem; border-radius: 999px; margin-bottom: .85rem;
     }
     .badge.ok { background: rgba(34,197,94,.15); color: var(--ok); }
-    .badge.warn { background: rgba(245,158,11,.15); color: #fbbf24; }
+    .badge.muted { background: rgba(156,163,175,.12); color: var(--muted); }
     label { display: block; font-size: .8rem; color: var(--muted); margin-bottom: .3rem; }
     input[type=text], input[type=date], input[type=file] {
       width: 100%; padding: .85rem .9rem; border-radius: 12px;
@@ -65,14 +65,15 @@
       width: 100%; border: 0; border-radius: 12px; padding: 1rem;
       font-size: 1.05rem; font-weight: 700; color: #fff; cursor: pointer;
     }
-    button[type=submit] {
+    /* Primário = laranja (automático) */
+    button[type=submit].btn-primary {
       background: linear-gradient(90deg, var(--accent), #ff8c33);
-      box-shadow: 0 8px 24px rgba(255,107,0,.3);
+      box-shadow: 0 8px 24px rgba(255,107,0,.35);
     }
-    button[type=submit].secondary {
-      background: linear-gradient(90deg, #4b5563, #374151);
-      box-shadow: none;
-      margin-top: .5rem;
+    /* Secundário = roxo suave (fallback PDF) */
+    button[type=submit].btn-secondary {
+      background: linear-gradient(90deg, #6d28d9, var(--accent2));
+      box-shadow: 0 6px 18px rgba(168,85,247,.25);
     }
     button[type=submit]:disabled { opacity: .55; cursor: wait; }
     .btn-pdf {
@@ -94,57 +95,26 @@
     #loading { display: none; text-align: center; color: var(--muted); margin-top: .75rem; font-size: .9rem; }
     .steps { font-size: .8rem; color: var(--muted); line-height: 1.5; }
     .steps ol { padding-left: 1.15rem; margin: .4rem 0 0; }
-    .divider {
-      text-align: center; color: var(--muted); font-size: .75rem;
-      margin: 1rem 0 .5rem; opacity: .8;
-    }
   </style>
 </head>
 <body>
   <div class="wrap">
     <header>
       <h1>Resumo de Rota</h1>
-      <p>Gera <strong>1 PDF de resumo</strong> (cidade e horários). O histórico completo do rastreador <strong>não fica no celular</strong> — é apagado no servidor.</p>
+      <p>Prioridade: o servidor busca no Sitrax <strong>sozinho</strong> e devolve 1 PDF de resumo. Upload de PDF fica só como plano B.</p>
     </header>
 
-    <!-- CAMINHO PRINCIPAL: upload do PDF do Sitrax -->
+    <!-- 1) PRIORIDADE: AUTOMÁTICO -->
     <div class="card">
-      <div class="badge ok">● Recomendado (funciona no celular)</div>
-      <h2>1. Enviar PDF do Sitrax</h2>
+      <div class="badge ok">● Prioridade — automático</div>
+      <h2>1. Buscar no Sitrax sozinho</h2>
       <p class="hint" style="margin-top:0;margin-bottom:.9rem">
-        No Sitrax: Posições → escolha o veículo → Filtrar → toque no ícone de <strong>download (nuvem)</strong>.
-        Depois envie esse PDF aqui.
-      </p>
-      <form method="post" action="/gerar-pdf" enctype="multipart/form-data" id="form-pdf">
-        <label for="pdf">Arquivo PDF (HistoricoPosicoes…)</label>
-        <input id="pdf" name="pdf" type="file" accept="application/pdf,.pdf" required />
-
-        <label for="placa_pdf">Placa (opcional)</label>
-        <input id="placa_pdf" name="placa" type="text" placeholder="Ex: PCE7B03" style="text-transform:uppercase" />
-
-        <label for="data_pdf">Data do relatório</label>
-        <input id="data_pdf" name="data" type="date" value="{{ today }}" />
-
-        <button type="submit" id="btn-pdf">Gerar resumo deste PDF</button>
-        <p class="hint">
-          O PDF do Sitrax fica só no servidor por alguns segundos, o resumo é gerado e o arquivo bruto é <strong>apagado</strong>.
-          No celular fica só o PDF de resumo, se você baixar.
-        </p>
-      </form>
-    </div>
-
-    <!-- CAMINHO AUTOMÁTICO (pode falhar no Railway) -->
-    <div class="card">
-      <div class="badge warn">○ Automático (experimental)</div>
-      <h2>2. Buscar no Sitrax sozinho</h2>
-      <p class="hint" style="margin-top:0;margin-bottom:.9rem">
-        O servidor tenta entrar no Sitrax com Chrome. Na nuvem isso às vezes falha (menu/headless).
-        Prefira o envio do PDF acima.
+        O servidor entra no Sitrax, escolhe a placa, baixa o histórico, monta o resumo e apaga os arquivos brutos.
       </p>
       <form method="post" action="/gerar" id="form-auto">
         <label for="placa">Placa</label>
         <input id="placa" name="placa" type="text" placeholder="Ex: PCE7B03"
-               value="{{ placa or '' }}" style="text-transform:uppercase" />
+               value="{{ placa or '' }}" style="text-transform:uppercase" required />
         <input type="hidden" name="modo" value="placa" />
         <div style="display:grid;grid-template-columns:1fr 1fr;gap:.65rem">
           <div>
@@ -156,17 +126,45 @@
             <input id="data_fim" name="data_fim" type="date" value="{{ data_fim or today }}" />
           </div>
         </div>
-        <button type="submit" class="secondary" id="btn-auto">Tentar automático</button>
+        <button type="submit" class="btn-primary" id="btn-auto">Gerar resumo automático</button>
+      </form>
+      <p class="hint">
+        <a href="/debug" style="color:#fb923c">Painel de calibração →</a>
+        (fotos de cada passo se der erro)
+      </p>
+    </div>
+
+    <!-- 2) FALLBACK: PDF -->
+    <div class="card">
+      <div class="badge muted">○ Plano B — se o automático falhar</div>
+      <h2>2. Enviar PDF do Sitrax</h2>
+      <p class="hint" style="margin-top:0;margin-bottom:.9rem">
+        No Sitrax: Posições → veículo → Filtrar → nuvem de download. Depois envie o PDF aqui.
+      </p>
+      <form method="post" action="/gerar-pdf" enctype="multipart/form-data" id="form-pdf">
+        <label for="pdf">Arquivo PDF (HistoricoPosicoes…)</label>
+        <input id="pdf" name="pdf" type="file" accept="application/pdf,.pdf" required />
+
+        <label for="placa_pdf">Placa (opcional)</label>
+        <input id="placa_pdf" name="placa" type="text" placeholder="Ex: PCE7B03" style="text-transform:uppercase" />
+
+        <label for="data_pdf">Data do relatório</label>
+        <input id="data_pdf" name="data" type="date" value="{{ today }}" />
+
+        <button type="submit" class="btn-secondary" id="btn-pdf">Gerar resumo deste PDF</button>
+        <p class="hint">
+          O PDF bruto fica só no servidor por segundos e é <strong>apagado</strong> depois do resumo.
+        </p>
       </form>
     </div>
 
-    <div id="loading">⏳ Processando… não feche esta tela.</div>
+    <div id="loading">⏳ Processando… não feche esta tela (pode levar alguns minutos).</div>
 
     {% if error %}
     <div class="card">
-      <h2>Erro</h2>
+      <h2>Erro no automático</h2>
       <pre class="error">{{ error }}</pre>
-      <p class="hint">Dica: baixe o PDF no Sitrax e use a opção <strong>Enviar PDF</strong> acima — é mais estável.</p>
+      <p class="hint">Se o automático falhar, use o <strong>Plano B</strong> (enviar PDF) ou abra o <a href="/debug" style="color:#fb923c">painel de calibração</a>.</p>
     </div>
     {% endif %}
 
@@ -184,34 +182,28 @@
     {% endif %}
 
     <div class="card steps">
-      <strong>Fluxo ideal no celular</strong>
+      <strong>Como funciona</strong>
       <ol>
-        <li>Abra o Sitrax → Histórico de Posições</li>
-        <li>Escolha o veículo e a data → Filtrar</li>
-        <li>Toque na <strong>nuvem de download</strong></li>
-        <li>Volte aqui e envie o PDF baixado</li>
-        <li>Receba o resumo (ex.: 12h–14h em Paulista)</li>
-        <li>O PDF bruto é apagado no servidor</li>
+        <li><strong>Automático (prioridade):</strong> placa + gerar — o servidor faz tudo</li>
+        <li><strong>Plano B:</strong> você baixa o PDF no Sitrax e envia aqui</li>
+        <li>Você recebe só o resumo (cidade / horário)</li>
+        <li>Arquivos brutos são apagados no servidor</li>
       </ol>
-      <p class="hint" style="margin-bottom:0">
-        <a href="/debug" style="color:#fb923c">Painel de calibração do robô →</a>
-        (fotos de cada passo da automação)
-      </p>
     </div>
   </div>
   <script>
-    function wire(formId, btnId) {
+    function wire(formId, btnId, label) {
       const form = document.getElementById(formId);
       const btn = document.getElementById(btnId);
       const loading = document.getElementById('loading');
       if (!form) return;
       form.addEventListener('submit', () => {
-        if (btn) { btn.disabled = true; btn.textContent = 'Gerando…'; }
+        if (btn) { btn.disabled = true; btn.textContent = label || 'Gerando…'; }
         loading.style.display = 'block';
       });
     }
-    wire('form-pdf', 'btn-pdf');
-    wire('form-auto', 'btn-auto');
+    wire('form-auto', 'btn-auto', 'Gerando…');
+    wire('form-pdf', 'btn-pdf', 'Gerando…');
   </script>
 </body>
 </html>
