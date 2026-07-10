@@ -30,11 +30,12 @@ from app.bot.report import (
     format_time,
 )
 
-# Mesma arte da home do app
+# Logo ANTONIO (pdf-fundo) — NÃO usar bg-hero dos headsets
 _BG_CANDIDATES = (
-    Path(__file__).resolve().parents[1] / "static" / "bg-hero.jpg",
-    Path(__file__).resolve().parents[2] / "static" / "bg-hero.jpg",
-    Path(__file__).resolve().parents[2] / "app" / "static" / "bg-hero.jpg",
+    Path(__file__).resolve().parents[1] / "static" / "pdf-fundo.jpg",
+    Path(__file__).resolve().parents[1] / "static" / "pdf-fundo.jpeg",
+    Path(__file__).resolve().parents[1] / "static" / "pdf-fundo.png",
+    Path(__file__).resolve().parents[2] / "app" / "static" / "pdf-fundo.jpg",
 )
 
 
@@ -46,9 +47,17 @@ def _bg_image_path() -> Optional[Path]:
 
 
 def _draw_page_background(canvas, doc) -> None:
-    """Foto de fundo (bg-hero) + véu + cartão claro para o texto."""
+    """
+    Fundo do resumo:
+      - cor sólida + logo ANTONIO em marca d'água
+      - cartão claro para o texto legível
+    """
     page_w, page_h = A4
     canvas.saveState()
+
+    # fundo sólido (escuro suave)
+    canvas.setFillColor(colors.HexColor("#0f1221"))
+    canvas.rect(0, 0, page_w, page_h, fill=1, stroke=0)
 
     bg = _bg_image_path()
     if bg is not None:
@@ -56,11 +65,15 @@ def _draw_page_background(canvas, doc) -> None:
             img = ImageReader(str(bg))
             iw, ih = img.getSize()
             if iw > 0 and ih > 0:
-                # cover: preenche a página inteira
-                scale = max(page_w / iw, page_h / ih)
+                # logo grande central como marca d'água (mantém proporção)
+                max_side = min(page_w, page_h) * 0.72
+                scale = max_side / max(iw, ih)
                 tw, th = iw * scale, ih * scale
                 x = (page_w - tw) / 2.0
-                y = (page_h - th) / 2.0
+                y = (page_h - th) / 2.0 - 0.4 * cm
+                canvas.saveState()
+                # reportlab não tem alpha em drawImage em todas versões:
+                # desenhamos e cobrimos com véu claro no cartão
                 canvas.drawImage(
                     img,
                     x,
@@ -71,23 +84,19 @@ def _draw_page_background(canvas, doc) -> None:
                     preserveAspectRatio=True,
                     anchor="c",
                 )
+                canvas.restoreState()
         except Exception:
-            # se a imagem falhar, só o fundo sólido
-            canvas.setFillColor(colors.HexColor("#0f1221"))
-            canvas.rect(0, 0, page_w, page_h, fill=1, stroke=0)
-    else:
-        canvas.setFillColor(colors.HexColor("#0f1221"))
-        canvas.rect(0, 0, page_w, page_h, fill=1, stroke=0)
+            pass
 
-    # véu escuro (estilo app) — a foto aparece nas bordas
-    canvas.setFillColor(Color(0.06, 0.07, 0.13, alpha=0.42))
+    # véu escuro leve por cima do logo (borda ainda mostra a marca)
+    canvas.setFillColor(Color(0.06, 0.07, 0.13, alpha=0.35))
     canvas.rect(0, 0, page_w, page_h, fill=1, stroke=0)
 
-    # cartão branco semi-transparente onde o conteúdo fica legível
+    # cartão branco onde o conteúdo fica legível
     margin_x = 1.05 * cm
     margin_y = 1.05 * cm
-    canvas.setFillColor(Color(1, 1, 1, alpha=0.93))
-    canvas.setStrokeColor(Color(1, 1, 1, alpha=0.5))
+    canvas.setFillColor(Color(1, 1, 1, alpha=0.94))
+    canvas.setStrokeColor(Color(1, 1, 1, alpha=0.55))
     canvas.setLineWidth(0.6)
     canvas.roundRect(
         margin_x,
@@ -99,7 +108,7 @@ def _draw_page_background(canvas, doc) -> None:
         stroke=1,
     )
 
-    # faixa laranja decorativa no topo do cartão
+    # faixa laranja no topo do cartão
     canvas.setFillColor(colors.HexColor("#ff6b00"))
     canvas.roundRect(
         margin_x,
@@ -110,7 +119,6 @@ def _draw_page_background(canvas, doc) -> None:
         fill=1,
         stroke=0,
     )
-    # “cobre” cantos inferiores da faixa (retângulo)
     canvas.rect(
         margin_x,
         page_h - margin_y - 0.45 * cm,
@@ -119,6 +127,24 @@ def _draw_page_background(canvas, doc) -> None:
         fill=1,
         stroke=0,
     )
+
+    # mini logo no canto inferior direito (dentro da margem, fora do cartão se couber)
+    if bg is not None:
+        try:
+            img = ImageReader(str(bg))
+            side = 1.35 * cm
+            canvas.drawImage(
+                img,
+                page_w - margin_x - side - 0.15 * cm,
+                margin_y + 0.15 * cm,
+                width=side,
+                height=side,
+                mask="auto",
+                preserveAspectRatio=True,
+                anchor="c",
+            )
+        except Exception:
+            pass
 
     canvas.restoreState()
 
