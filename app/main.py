@@ -515,17 +515,20 @@ async def calibrar(request: Request):
                     from pathlib import Path as P
 
                     try:
-                        # clica nuvem (mesmo código do download_historico_pdf)
+                        # nuvem → menu Export → "PDF file"
                         bot._click_download_cloud()
-                        bot._trace("calibragem_download_click", "Clicou na nuvem de download")
-                        end = __import__("time").time() + 60
+                        end = __import__("time").time() + 90
                         pdf = None
                         while __import__("time").time() < end:
-                            partial = list(tmp.glob("*.crdownload")) + list(tmp.glob("*.tmp"))
+                            partial = list(tmp.glob("*.crdownload")) + list(
+                                tmp.glob("*.tmp")
+                            )
                             if partial:
                                 __import__("time").sleep(0.5)
                                 continue
-                            news = [p for p in tmp.glob("*.pdf") if p.name not in before]
+                            news = [
+                                p for p in tmp.glob("*.pdf") if p.name not in before
+                            ]
                             if news:
                                 pdf = max(news, key=lambda p: p.stat().st_mtime)
                                 if pdf.stat().st_size > 1000:
@@ -534,12 +537,12 @@ async def calibrar(request: Request):
                         if pdf and pdf.exists():
                             bot._trace(
                                 "calibragem_ok",
-                                f"PDF baixado: {pdf.name} ({pdf.stat().st_size} bytes)",
+                                f"PDF baixado: {pdf.name} ({pdf.stat().st_size} bytes) — ciclo completo!",
                             )
                         else:
                             bot._trace(
                                 "calibragem_download_timeout",
-                                "Clicou na nuvem mas o PDF não chegou na pasta temp",
+                                "Clicou Export/PDF mas o arquivo não chegou na pasta temp do servidor",
                                 ok=False,
                             )
                     except Exception as e:
