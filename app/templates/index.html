@@ -155,6 +155,21 @@
       <p>Prioridade: o servidor busca no Sitrax <strong>sozinho</strong> e devolve 1 PDF de resumo. Upload de PDF fica só como plano B.</p>
     </header>
 
+    {% if job_running or job_msg or job_status %}
+    <div class="card" id="job-box" style="border-color:#ff6b00">
+      <div class="badge ok">● Processando no servidor</div>
+      <p class="hint" style="margin:0;color:#fde68a;font-size:.9rem">
+        {% if job_msg %}{{ job_msg }}{% else %}{{ job_status }}{% endif %}
+      </p>
+      <p class="hint" id="job-live" style="margin:.5rem 0 0">{{ job_status }}</p>
+      <p class="hint" style="margin:.65rem 0 0">
+        Frota roda em segundo plano (evita “upstream error”).
+        Acompanhe em <a href="/debug" style="color:#fdba74">/debug</a>.
+        Esta página atualiza sozinha.
+      </p>
+    </div>
+    {% endif %}
+
     <!-- 1) PRIORIDADE: AUTOMÁTICO -->
     <div class="card">
       <div class="badge ok">● Prioridade — automático</div>
@@ -194,8 +209,8 @@
         <button type="submit" class="btn-primary" id="btn-auto">Gerar resumo automático</button>
         <p class="hint">
           No Sitrax <strong>não dá para marcar todos de uma vez</strong> — o robô faz <strong>1 por 1</strong>:<br/>
-          abre a lista → escolhe a placa → Filter → nuvem → PDF → resumo → próximo carro…<br/>
-          No final você recebe <strong>1 PDF</strong> com o resumo de todos, nesta mesma tela (baixar).
+          Filter → lê a tabela → resumo → próximo carro (Chrome reinicia a cada 3 placas).<br/>
+          <strong>Todos</strong> roda em <strong>segundo plano</strong> (evita erro “upstream”). Acompanhe em /debug e baixe o PDF quando terminar.
         </p>
       </form>
       <p class="hint">
@@ -261,6 +276,9 @@
       </ol>
     </div>
   </div>
+  <div id="loading" style="display:none;text-align:center;color:var(--muted);padding:1rem">
+    Processando no servidor… pode demorar. Não feche esta aba.
+  </div>
   <script>
     function wire(formId, btnId, label) {
       const form = document.getElementById(formId);
@@ -269,11 +287,34 @@
       if (!form) return;
       form.addEventListener('submit', () => {
         if (btn) { btn.disabled = true; btn.textContent = label || 'Gerando…'; }
-        loading.style.display = 'block';
+        if (loading) loading.style.display = 'block';
       });
     }
     wire('form-auto', 'btn-auto', 'Gerando…');
     wire('form-pdf', 'btn-pdf', 'Gerando…');
+
+    // Frota em background: atualiza status e recarrega quando terminar
+    (function pollJob() {
+      const box = document.getElementById('job-box');
+      const live = document.getElementById('job-live');
+      const shouldPoll = {{ 'true' if job_running else 'false' }};
+      if (!shouldPoll && !box) return;
+      async function tick() {
+        try {
+          const r = await fetch('/job-status', { cache: 'no-store' });
+          const j = await r.json();
+          if (live && j.message) live.textContent = j.message;
+          if (j.done || (!j.running && j.has_pdf)) {
+            window.location.href = '/';
+            return;
+          }
+          if (j.running) setTimeout(tick, 8000);
+        } catch (e) {
+          setTimeout(tick, 12000);
+        }
+      }
+      if (shouldPoll) setTimeout(tick, 5000);
+    })();
   </script>
 </body>
 </html>

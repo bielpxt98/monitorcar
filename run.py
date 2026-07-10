@@ -74,6 +74,9 @@ def cmd_serve(args: argparse.Namespace) -> None:
         host=args.host,
         port=args.port or settings.port,
         reload=args.reload,
+        timeout_keep_alive=120,
+        # jobs longos (1 placa) ainda síncronos; frota é background
+        limit_concurrency=20,
     )
 
 

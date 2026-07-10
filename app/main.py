@@ -39,6 +39,16 @@ app.mount("/static", StaticFiles(directory=str(static_dir)), name="static")
 
 # cache em memória do último PDF-resumo (não é o bruto do Sitrax)
 _LAST_REPORT: dict = {}
+# job em background (frota demora → evita "upstream error" do Railway)
+_JOB: dict = {
+    "running": False,
+    "modo": "",
+    "placa": "",
+    "started": "",
+    "message": "",
+    "error": "",
+    "done": False,
+}
 
 
 def parse_date(value: str) -> Optional[date]:
@@ -67,10 +77,13 @@ async def home(request: Request):
         {
             "configured": sitrax_configured(),
             "today": date.today().isoformat(),
-            "error": None,
-            "texto": None,
+            "error": _JOB.get("error") if _JOB.get("done") and not _LAST_REPORT.get("pdf_bytes") else None,
+            "texto": _LAST_REPORT.get("texto"),
             "has_pdf": bool(_LAST_REPORT.get("pdf_bytes")),
             "pdf_name": _LAST_REPORT.get("pdf_filename"),
+            "job_msg": None,
+            "job_running": bool(_JOB.get("running")),
+            "job_status": _JOB.get("message") or "",
         },
     )
 
@@ -105,27 +118,66 @@ def _run_job(modo: str, placa: str, d_ini: date, d_fim: date):
             headless=True,
         )
 
-    # ——— TODOS: percorre a frota; 1 PDF com resumo de cada placa ———
+    # ——— TODOS: frota 1 a 1; Chrome reinicia a cada N placas (evita tab crashed) ———
     from app.bot.summary_pdf import build_summary_pdf_bytes, safe_filename
     from app.bot.report import build_narrative_report
-    from app.bot.pdf_parser import positions_from_pdf
     from pypdf import PdfWriter, PdfReader
     import io
+    import gc
 
     debug_session.start_run(placa="FROTA")
     textos: list[str] = []
     pdf_writer = PdfWriter()
     total_pontos = 0
+    # a cada quantas placas reabre o Chrome (RAM Railway)
+    RESTART_EVERY = 3
+
+    def _is_crash(err: BaseException) -> bool:
+        s = str(err).lower()
+        return any(
+            x in s
+            for x in (
+                "tab crashed",
+                "session deleted",
+                "invalid session",
+                "disconnected",
+                "chrome not reachable",
+                "no such window",
+                "target window already closed",
+            )
+        )
 
     try:
         with TempWorkspace(prefix="sitrax_frota_") as tmp:
-            with SitraxBot(headless=True, download_dir=tmp) as bot:
-                bot.login()
+            bot: Optional[SitraxBot] = None
+
+            def _new_bot() -> SitraxBot:
+                b = SitraxBot(
+                    headless=True,
+                    download_dir=tmp,
+                    quiet=True,
+                    low_memory=True,
+                )
+                b.start()
+                b.login()
+                return b
+
+            def _kill_bot() -> None:
+                nonlocal bot
+                if bot is not None:
+                    try:
+                        bot.close()
+                    except Exception:
+                        pass
+                    bot = None
+                gc.collect()
+
+            try:
+                bot = _new_bot()
                 bot.open_posicoes()
                 bot.open_vehicle_selector()
                 bot.load_vehicle_list()
                 vehicles = bot.list_plates()
-                # fecha modal se aberto
                 try:
                     bot._d().execute_script(
                         "if (typeof hideModalSearchVeiculo === 'function') "
@@ -139,15 +191,13 @@ def _run_job(modo: str, placa: str, d_ini: date, d_fim: date):
                         "frota_vazia",
                         "Nenhum veículo listado no modal",
                         ok=False,
-                        screenshot=True,
-                        driver=bot._d(),
+                        screenshot=False,
                     )
                     raise RuntimeError(
                         "Não achei a lista de veículos da frota. "
                         "Tente 1 placa ou use o upload de PDF."
                     )
 
-                # remove nomes inválidos; processa 1 placa por vez (Sitrax não tem "selecionar todos")
                 vehicles = [
                     v
                     for v in vehicles
@@ -156,74 +206,99 @@ def _run_job(modo: str, placa: str, d_ini: date, d_fim: date):
                 ]
                 debug_session.step(
                     "frota_lista",
-                    f"Frota: {len(vehicles)} veículo(s) — processando 1 a 1: "
+                    f"Frota: {len(vehicles)} veículo(s) — 1 a 1 "
+                    f"(reinicia Chrome a cada {RESTART_EVERY}): "
                     + ", ".join(v["placa"] for v in vehicles[:25]),
                     ok=True,
                     screenshot=False,
                 )
+                _JOB["message"] = f"Frota: 0/{len(vehicles)}"
 
                 for i, v in enumerate(vehicles):
                     pl = v["placa"]
+                    _JOB["message"] = f"Processando {i+1}/{len(vehicles)}: {pl}"
                     debug_session.step(
                         f"frota_{i+1}_de_{len(vehicles)}_{pl}",
-                        f"1 a 1 → ({i+1}/{len(vehicles)}) placa {pl}: "
-                        "Vehicle → Select → Filter → Export PDF → resumo",
+                        f"1 a 1 → ({i+1}/{len(vehicles)}) {pl} "
+                        "(Filter → scrape tabela → resumo)",
                         ok=True,
                         screenshot=False,
                     )
-                    try:
-                        # cada ciclo reabre o fluxo completo no Sitrax (1 placa)
-                        pdf_bruto = None
-                        try:
-                            pdf_bruto = bot.download_historico_pdf(
-                                pl, data_ini=d_ini, data_fim=d_fim, dest_dir=tmp
-                            )
-                        except Exception as e:
-                            logger.warning("Download %s: %s", pl, e)
 
-                        if pdf_bruto and Path(pdf_bruto).exists():
-                            _, positions = positions_from_pdf(pdf_bruto)
-                            debug_session.step(
-                                f"frota_pdf_ok_{pl}",
-                                f"{pl}: PDF baixado ({Path(pdf_bruto).stat().st_size} bytes)",
-                                ok=True,
-                                screenshot=False,
-                            )
-                        else:
+                    # reinicia Chrome periodicamente (memória)
+                    if i > 0 and i % RESTART_EVERY == 0:
+                        debug_session.step(
+                            "frota_restart_chrome",
+                            f"Reiniciando Chrome após {i} veículos (anti tab-crash)",
+                            ok=True,
+                            screenshot=False,
+                        )
+                        _kill_bot()
+                        bot = _new_bot()
+
+                    if bot is None or not bot.alive():
+                        _kill_bot()
+                        bot = _new_bot()
+
+                    attempts = 0
+                    while attempts < 2:
+                        attempts += 1
+                        try:
+                            # Frota: prioriza SCRAPE (menos RAM que baixar PDF 700+ pts)
                             positions = bot.get_positions_for_plate(
                                 pl, data_ini=d_ini, data_fim=d_fim
                             )
+                            n_pts = len([p for p in positions if p.when])
                             debug_session.step(
-                                f"frota_scrape_{pl}",
-                                f"{pl}: sem PDF, usou scrape da tabela",
+                                f"frota_ok_{pl}",
+                                f"{pl}: {n_pts} ponto(s) via tabela",
                                 ok=True,
                                 screenshot=False,
                             )
-
-                        total_pontos += len([p for p in positions if p.when])
-                        textos.append(
-                            build_narrative_report(
+                            total_pontos += n_pts
+                            textos.append(
+                                build_narrative_report(
+                                    pl,
+                                    positions,
+                                    data_ref=data_ref,
+                                    cliente=v.get("cliente", ""),
+                                )
+                            )
+                            one = build_summary_pdf_bytes(
                                 pl,
                                 positions,
                                 data_ref=data_ref,
                                 cliente=v.get("cliente", ""),
                             )
-                        )
-                        one = build_summary_pdf_bytes(
-                            pl,
-                            positions,
-                            data_ref=data_ref,
-                            cliente=v.get("cliente", ""),
-                        )
-                        reader = PdfReader(io.BytesIO(one))
-                        for page in reader.pages:
-                            pdf_writer.add_page(page)
-                    except Exception as e:
-                        logger.exception("Falha em %s", pl)
-                        textos.append(f"📋 {pl}: erro — {e}")
-                        debug_session.step(
-                            f"frota_erro_{pl}", str(e), ok=False, screenshot=False
-                        )
+                            reader = PdfReader(io.BytesIO(one))
+                            for page in reader.pages:
+                                pdf_writer.add_page(page)
+                            break
+                        except Exception as e:
+                            logger.exception("Falha em %s (tentativa %s)", pl, attempts)
+                            if _is_crash(e) and attempts < 2:
+                                debug_session.step(
+                                    f"frota_crash_{pl}",
+                                    f"Chrome caiu em {pl}; reiniciando e tentando de novo",
+                                    ok=False,
+                                    screenshot=False,
+                                )
+                                _kill_bot()
+                                bot = _new_bot()
+                                continue
+                            textos.append(f"📋 {pl}: erro — {e}")
+                            debug_session.step(
+                                f"frota_erro_{pl}",
+                                str(e),
+                                ok=False,
+                                screenshot=False,
+                            )
+                            if _is_crash(e):
+                                _kill_bot()
+                                bot = _new_bot()
+                            break
+            finally:
+                _kill_bot()
 
         out = io.BytesIO()
         if len(pdf_writer.pages) == 0:
@@ -335,6 +410,55 @@ async def gerar_pdf(
     )
 
 
+def _store_result(result) -> None:
+    _LAST_REPORT.clear()
+    _LAST_REPORT.update(
+        {
+            "pdf_bytes": result.pdf_bytes,
+            "pdf_filename": result.pdf_filename,
+            "texto": result.texto,
+            "placa": result.placa,
+        }
+    )
+
+
+def _start_bg_job(modo: str, placa: str, d_ini: date, d_fim: date) -> bool:
+    """Inicia job em background. False se já houver um rodando."""
+    if _JOB.get("running"):
+        return False
+
+    def work():
+        _JOB.update(
+            {
+                "running": True,
+                "done": False,
+                "error": "",
+                "modo": modo,
+                "placa": placa,
+                "started": datetime.now().strftime("%H:%M:%S"),
+                "message": "Iniciando…",
+            }
+        )
+        try:
+            result = _run_job(modo, placa, d_ini, d_fim)
+            _store_result(result)
+            _JOB["message"] = (
+                f"Concluído — {result.placa} ({result.pontos} pontos). "
+                "Baixe o PDF na home."
+            )
+            _JOB["done"] = True
+        except Exception as e:
+            logger.exception("Job background falhou")
+            _JOB["error"] = f"{type(e).__name__}: {e}"
+            _JOB["message"] = f"Erro: {e}"
+            _JOB["done"] = True
+        finally:
+            _JOB["running"] = False
+
+    executor.submit(work)
+    return True
+
+
 @app.post("/gerar", response_class=HTMLResponse)
 async def gerar(
     request: Request,
@@ -343,12 +467,18 @@ async def gerar(
     data_ini: str = Form(""),
     data_fim: str = Form(""),
 ):
+    """
+    1 placa: espera o resultado (minutos).
+    Todos (frota): roda em BACKGROUND — evita "upstream error" do proxy Railway
+    em jobs longos; acompanhe /debug e volte na home para baixar.
+    """
     import asyncio
 
     error = None
     texto = None
     has_pdf = False
     pdf_name = None
+    job_msg = None
 
     if not sitrax_configured():
         error = "Servidor sem credenciais Sitrax (.env). Contate o administrador."
@@ -357,27 +487,50 @@ async def gerar(
     else:
         d_ini = parse_date(data_ini) or date.today()
         d_fim = parse_date(data_fim) or d_ini
-        loop = asyncio.get_event_loop()
-        try:
-            result = await loop.run_in_executor(
-                executor,
-                lambda: _run_job(modo, placa, d_ini, d_fim),
-            )
-            _LAST_REPORT.clear()
-            _LAST_REPORT.update(
-                {
-                    "pdf_bytes": result.pdf_bytes,
-                    "pdf_filename": result.pdf_filename,
-                    "texto": result.texto,
-                    "placa": result.placa,
-                }
-            )
-            texto = result.texto
-            has_pdf = True
-            pdf_name = result.pdf_filename
-        except Exception as e:
-            logger.exception("Erro ao gerar")
-            error = f"{type(e).__name__}: {e}"
+        modo_n = (modo or "placa").lower()
+        placa_u = (placa or "").strip().upper()
+        if placa_u in ("TODOS", "TODAS", "ALL", "FROTA", "*"):
+            modo_n = "todos"
+
+        if modo_n == "todos":
+            # BACKGROUND — frota demora 10–30+ min; proxy corta conexão síncrona
+            if _JOB.get("running"):
+                job_msg = (
+                    f"Já há um job em andamento desde {_JOB.get('started')}: "
+                    f"{_JOB.get('message')}. Acompanhe em /debug."
+                )
+            else:
+                ok = _start_bg_job("todos", placa, d_ini, d_fim)
+                if ok:
+                    job_msg = (
+                        "Frota iniciada em segundo plano (evita erro upstream). "
+                        "Acompanhe os passos em Calibração (/debug). "
+                        "Quando terminar, volte aqui e use Baixar PDF do resumo. "
+                        "A página atualiza sozinha a cada 15s."
+                    )
+                else:
+                    job_msg = "Não foi possível iniciar o job (ocupado)."
+        else:
+            # 1 placa — espera (ainda pode demorar 1–3 min)
+            loop = asyncio.get_event_loop()
+            try:
+                result = await loop.run_in_executor(
+                    executor,
+                    lambda: _run_job("placa", placa, d_ini, d_fim),
+                )
+                _store_result(result)
+                texto = result.texto
+                has_pdf = True
+                pdf_name = result.pdf_filename
+            except Exception as e:
+                logger.exception("Erro ao gerar")
+                error = f"{type(e).__name__}: {e}"
+
+    # se job terminou enquanto a home abre, mostra resultado
+    if not texto and _LAST_REPORT.get("texto") and not _JOB.get("running"):
+        texto = _LAST_REPORT.get("texto")
+        has_pdf = bool(_LAST_REPORT.get("pdf_bytes"))
+        pdf_name = _LAST_REPORT.get("pdf_filename")
 
     return templates.TemplateResponse(
         request,
@@ -393,8 +546,23 @@ async def gerar(
             "placa": placa,
             "data_ini": data_ini,
             "data_fim": data_fim,
+            "job_msg": job_msg,
+            "job_running": bool(_JOB.get("running")),
+            "job_status": _JOB.get("message") or "",
         },
     )
+
+
+@app.get("/job-status")
+async def job_status():
+    return {
+        "running": bool(_JOB.get("running")),
+        "done": bool(_JOB.get("done")),
+        "message": _JOB.get("message") or "",
+        "error": _JOB.get("error") or "",
+        "has_pdf": bool(_LAST_REPORT.get("pdf_bytes")),
+        "pdf_name": _LAST_REPORT.get("pdf_filename"),
+    }
 
 
 @app.get("/baixar-resumo")

@@ -52,6 +52,8 @@ class SitraxBot:
         login_url: Optional[str] = None,
         headless: Optional[bool] = None,
         download_dir: Optional[Path | str] = None,
+        quiet: bool = False,
+        low_memory: bool = False,
     ):
         self.cliente = cliente or settings.sitrax_cliente
         self.usuario = usuario or settings.sitrax_usuario
@@ -60,8 +62,12 @@ class SitraxBot:
         self.headless = settings.sitrax_headless if headless is None else headless
         # Downloads do Sitrax só no servidor (pasta temp) — nunca no celular do usuário
         self.download_dir = Path(download_dir) if download_dir else None
+        # frota: menos screenshots / menos RAM
+        self.quiet = quiet
+        self.low_memory = low_memory or quiet
         self.driver: Optional[webdriver.Chrome] = None
         self.wait: Optional[WebDriverWait] = None
+        self._chrome_profile: Optional[Path] = None
 
     def __enter__(self) -> "SitraxBot":
         self.start()
@@ -84,12 +90,10 @@ class SitraxBot:
             )
         opts = Options()
         if self.headless:
-            # headless "new" com viewport desktop (layout igual ao PC, não mobile)
             opts.add_argument("--headless=new")
         else:
-            # local: janela grande, NÃO minimizada
             opts.add_argument("--start-maximized")
-        # Flags críticas para Docker/Railway (evita "tab crashed" por /dev/shm e RAM)
+        # Flags críticas Docker/Railway (tab crashed = quase sempre RAM/shm)
         opts.add_argument("--no-sandbox")
         opts.add_argument("--disable-dev-shm-usage")
         opts.add_argument("--disable-gpu")
@@ -103,30 +107,46 @@ class SitraxBot:
         opts.add_argument("--mute-audio")
         opts.add_argument("--no-first-run")
         opts.add_argument("--safebrowsing-disable-auto-update")
-        # viewport DESKTOP — o Sitrax esconde "Veículo"/filtros em largura pequena
-        opts.add_argument("--window-size=1920,1080")
-        opts.add_argument("--window-position=0,0")
-        opts.add_argument("--force-device-scale-factor=1")
-        opts.add_argument("--high-dpi-support=1")
-        opts.add_argument("--lang=pt-BR")
-        opts.add_argument("--disable-blink-features=AutomationControlled")
         opts.add_argument("--disable-notifications")
         opts.add_argument("--disable-popup-blocking")
-        opts.add_argument("--renderer-process-limit=2")
-        opts.add_argument("--js-flags=--max-old-space-size=384")
-        # user-agent desktop (evita layout mobile no headless)
+        opts.add_argument("--disable-hang-monitor")
+        opts.add_argument("--disable-component-update")
+        opts.add_argument("--disable-domain-reliability")
+        opts.add_argument("--disable-features=TranslateUI,BlinkGenPropertyTrees,AudioServiceOutOfProcess")
+        opts.add_argument("--disable-ipc-flooding-protection")
+        opts.add_argument("--disable-renderer-backgrounding")
+        opts.add_argument("--disable-backgrounding-occluded-windows")
+        opts.add_argument("--disable-client-side-phishing-detection")
+        opts.add_argument("--memory-pressure-off")
+        # 1 renderer — frota longa no Railway
+        opts.add_argument("--renderer-process-limit=1")
+        opts.add_argument("--js-flags=--max-old-space-size=256")
+        # viewport desktop menor = menos RAM (ainda não é mobile)
+        if self.low_memory:
+            opts.add_argument("--window-size=1366,768")
+            opts.add_argument("--force-device-scale-factor=1")
+        else:
+            opts.add_argument("--window-size=1600,900")
+            opts.add_argument("--force-device-scale-factor=1")
+        opts.add_argument("--window-position=0,0")
+        opts.add_argument("--lang=pt-BR")
+        opts.add_argument("--disable-blink-features=AutomationControlled")
         opts.add_argument(
             "--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
             "AppleWebKit/537.36 (KHTML, like Gecko) "
             "Chrome/120.0.0.0 Safari/537.36"
         )
-        # perfil/cache em temp (Docker/Railway e Windows)
+        # perfil ÚNICO por sessão (evita lock/corrupção e vazamento de cache)
         import tempfile as _tmpmod
+        import uuid as _uuid
 
-        _chrome_tmp = Path(_tmpmod.gettempdir()) / "sitrax-chrome"
+        _chrome_tmp = Path(_tmpmod.gettempdir()) / "sitrax-chrome" / _uuid.uuid4().hex[:12]
         _chrome_tmp.mkdir(parents=True, exist_ok=True)
+        self._chrome_profile = _chrome_tmp
         opts.add_argument(f"--user-data-dir={_chrome_tmp / 'user-data'}")
         opts.add_argument(f"--disk-cache-dir={_chrome_tmp / 'cache'}")
+        opts.add_argument("--disk-cache-size=1")
+        opts.add_argument("--media-cache-size=1")
         # evita popups "Salvar senha?" / "Usar chave de acesso?" do Chrome
         opts.add_experimental_option(
             "excludeSwitches", ["enable-automation", "enable-logging"]
@@ -170,21 +190,23 @@ class SitraxBot:
                 except Exception:
                     self.driver.set_window_rect(0, 0, 1920, 1080)
             else:
-                self.driver.set_window_size(1920, 1080)
+                w, h = (1366, 768) if self.low_memory else (1600, 900)
+                self.driver.set_window_size(w, h)
         except Exception as e:
             logger.warning("Ajuste de janela: %s", e)
 
-        # CDP: viewport desktop fixo (headless e Docker)
+        # CDP: viewport desktop fixo
         try:
+            w, h = (1366, 768) if self.low_memory else (1600, 900)
             self.driver.execute_cdp_cmd(
                 "Emulation.setDeviceMetricsOverride",
                 {
-                    "width": 1920,
-                    "height": 1080,
+                    "width": w,
+                    "height": h,
                     "deviceScaleFactor": 1,
                     "mobile": False,
-                    "screenWidth": 1920,
-                    "screenHeight": 1080,
+                    "screenWidth": w,
+                    "screenHeight": h,
                 },
             )
             self.driver.execute_cdp_cmd(
@@ -194,13 +216,12 @@ class SitraxBot:
         except Exception as e:
             logger.warning("CDP desktop viewport: %s", e)
 
-        # Chrome headless: força download dir via CDP (Page + Browser)
         self._ensure_download_behavior()
 
         self._trace(
             "chrome_pronto",
-            f"Chrome desktop 1920x1080 headless={self.headless}",
-            shot=True,
+            f"Chrome desktop low_mem={self.low_memory} headless={self.headless}",
+            shot=not self.quiet,
         )
 
     def _ensure_download_behavior(self) -> None:
@@ -241,6 +262,25 @@ class SitraxBot:
                 pass
         self.driver = None
         self.wait = None
+        # apaga perfil temp (libera disco/RAM no Railway)
+        if self._chrome_profile and self._chrome_profile.exists():
+            try:
+                import shutil
+
+                shutil.rmtree(self._chrome_profile, ignore_errors=True)
+            except Exception:
+                pass
+        self._chrome_profile = None
+
+    def alive(self) -> bool:
+        """False se a aba/sessão do Chrome morreu (tab crashed)."""
+        if not self.driver:
+            return False
+        try:
+            _ = self.driver.current_url
+            return True
+        except Exception:
+            return False
 
     def _d(self) -> webdriver.Chrome:
         if not self.driver:
@@ -299,11 +339,14 @@ class SitraxBot:
 
     def _trace(self, name: str, message: str = "", ok: bool = True, shot: bool = True) -> None:
         """Passo leve para o painel de calibração."""
+        # frota: screenshots consomem RAM e derrubam o Chrome
+        if self.quiet:
+            shot = False
         try:
             debug_session.step(
                 name,
                 message,
-                driver=self._d() if self.driver else None,
+                driver=self._d() if (self.driver and shot) else None,
                 ok=ok,
                 screenshot=shot,
             )
