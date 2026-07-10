@@ -908,27 +908,44 @@ class SitraxBot:
             )
         logger.info("Modal de veículos aberto")
 
-    def _vehicle_rows_visible(self) -> bool:
-        """True se o modal mostra veículos (só conta itens cadVeiculoSearchSelect)."""
+    def _count_vehicle_items(self) -> int:
+        """Conta itens do modal (cadVeiculoSearchSelect) — sem depender de is_displayed."""
         d = self._d()
-        # NÃO contar checkbox genérico — só a lista real de carros
-        items = d.find_elements(
-            By.CSS_SELECTOR, "div[onclick*='cadVeiculoSearchSelect']"
-        )
-        for el in items:
-            try:
-                if el.is_displayed():
-                    return True
-            except StaleElementReferenceException:
-                continue
-        # fallback id padrão do Sitrax
-        items2 = d.find_elements(By.CSS_SELECTOR, "div[id$='_idDivSearchVeiculo']")
-        for el in items2:
-            try:
-                if el.is_displayed() and (el.text or "").strip():
-                    return True
-            except StaleElementReferenceException:
-                continue
+        try:
+            n = d.execute_script(
+                """
+                var a = document.querySelectorAll("div[onclick*='cadVeiculoSearchSelect']");
+                if (a && a.length) return a.length;
+                var b = document.querySelectorAll("div[id$='_idDivSearchVeiculo']");
+                return b ? b.length : 0;
+                """
+            )
+            return int(n or 0)
+        except Exception:
+            pass
+        try:
+            return len(
+                d.find_elements(
+                    By.CSS_SELECTOR, "div[onclick*='cadVeiculoSearchSelect']"
+                )
+            )
+        except Exception:
+            return 0
+
+    def _vehicle_rows_visible(self) -> bool:
+        """True se o modal já tem veículos na lista."""
+        n = self._count_vehicle_items()
+        if n >= 1:
+            return True
+        # fallback: placa no HTML do modal
+        try:
+            src = self._d().page_source or ""
+            if "cadVeiculoSearchSelect" in src and re.search(
+                r"[A-Z]{3}\d[A-Z0-9]\d{2}", src
+            ):
+                return True
+        except Exception:
+            pass
         return False
 
     def _click_placa_lupa_preta(self) -> bool:
@@ -1009,59 +1026,100 @@ class SitraxBot:
 
     def load_vehicle_list(self, placa: Optional[str] = None) -> None:
         """
-        Fluxo que o usuário descreveu:
-          1) Clicar na lupa PRETA ao lado de Placa
-          2) Esperar os veículos aparecerem
-        (NÃO digitar, NÃO clicar lupas roxas de Display/Cliente/Serial)
+        Calibração (foto /debug):
+          - Muitas vezes a lista JÁ vem cheia ao abrir o modal.
+          - Se já tem itens → NÃO clicar na lupa (clicar de novo pode esvaziar).
+          - Só clica na lupa preta de Placa se a lista estiver vazia.
         """
         d = self._d()
-        self._sleep(0.8)
+        self._sleep(0.6)
 
-        # se já tem lista, ok
-        if self._vehicle_rows_visible():
-            logger.info("Lista já estava visível")
-            return
+        # 1) Espera a lista carregar sozinha (como na calibração bem-sucedida)
+        for i in range(12):
+            n = self._count_vehicle_items()
+            if n >= 1:
+                msg = f"Lista já pronta com {n} veículo(s) — NÃO clicar na lupa"
+                logger.info(msg)
+                self._trace("lista_ja_pronta", msg, ok=True, shot=True)
+                return
+            self._sleep(0.4)
 
-        # limpa o campo placa (filtro vazio = todos os veículos)
-        try:
-            inp = d.find_element(
-                By.CSS_SELECTOR, "input[id='formModalSearchVeiculo:itCveiPlaca']"
-            )
-            d.execute_script("arguments[0].value='';", inp)
-        except Exception:
-            pass
-
-        logger.info("Clicando na lupa preta ao lado de Placa…")
+        # 2) Ainda vazia → uma única vez a lupa preta de Placa
+        self._trace(
+            "lista_vazia_vai_lupa",
+            "Lista vazia após espera; clicando lupa de Placa UMA vez",
+            ok=True,
+            shot=True,
+        )
+        logger.info("Lista vazia; clicando lupa preta de Placa (1x)…")
         if not self._click_placa_lupa_preta():
-            self._save_debug("lupa_preta_placa_nao_achada")
+            self._save_debug(
+                "lupa_preta_placa_nao_achada",
+                "Lupa de Placa não encontrada",
+                ok=False,
+            )
             raise TimeoutException(
-                "Não achei a lupa preta ao lado de Placa. "
-                f"Veja {DEBUG_DIR}"
+                "Lista vazia e não achei a lupa preta ao lado de Placa. "
+                "Abra /debug."
             )
 
         self._wait_loader_gone(45)
-        self._sleep(1.5)
+        self._sleep(1.2)
 
-        end = time.time() + 30
+        end = time.time() + 25
         while time.time() < end:
-            if self._vehicle_rows_visible():
-                n = 0
+            n = self._count_vehicle_items()
+            if n >= 1:
+                msg = f"Veículos após lupa Placa: {n} item(ns)"
+                logger.info(msg)
+                self._save_debug("lista_apos_lupa_placa", msg, ok=True)
+                return
+            self._sleep(0.4)
+
+        # 3) Ainda vazio: se tem placa, tenta filtrar digitando (sem outra lupa roxa)
+        placa_u = re.sub(r"[^A-Z0-9]", "", (placa or "").upper())
+        if placa_u:
+            self._trace(
+                "lista_ainda_vazia_digita_placa",
+                f"Digitando placa {placa_u} no filtro e filtrando",
+                ok=True,
+                shot=True,
+            )
+            try:
+                inp = d.find_element(
+                    By.CSS_SELECTOR, "input[id='formModalSearchVeiculo:itCveiPlaca']"
+                )
+                d.execute_script(
+                    "arguments[0].value=''; arguments[0].value=arguments[1];",
+                    inp,
+                    placa_u,
+                )
                 try:
-                    n = d.execute_script(
-                        "return document.querySelectorAll("
-                        "\"div[onclick*='cadVeiculoSearchSelect']\").length;"
-                    )
+                    inp.clear()
+                    inp.send_keys(placa_u)
                 except Exception:
                     pass
-                logger.info("Veículos apareceram após lupa Placa (itens=%s)", n)
-                self._save_debug("lista_apos_lupa_placa")
-                return
-            time.sleep(0.4)
+                d.execute_script(
+                    "if (typeof swClick === 'function') "
+                    "swClick('formModalSearchVeiculo:btnFiltrarVeiculo');"
+                )
+                self._wait_loader_gone(30)
+                self._sleep(1)
+                if self._count_vehicle_items() >= 1 or self._find_vehicle_item(placa_u):
+                    self._trace("lista_ok_apos_digitar", f"Achou {placa_u}", ok=True)
+                    return
+            except Exception as e:
+                logger.warning("Filtro por placa digitada: %s", e)
 
-        self._save_debug("lista_vazia_apos_lupa_placa")
+        self._save_debug(
+            "lista_vazia_apos_lupa_placa",
+            "Lista continua vazia após lupa (e filtro por placa)",
+            ok=False,
+        )
         raise TimeoutException(
-            "Cliquei na lupa de Placa mas os veículos não apareceram. "
-            f"Veja {DEBUG_DIR}"
+            "Modal aberto mas a lista de veículos não carregou. "
+            "Se a lupa já tinha lista, não deveria clicar de novo — "
+            "abra /debug para calibrar."
         )
 
     def list_plates(self) -> list[dict]:

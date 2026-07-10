@@ -412,10 +412,25 @@ async def calibrar(request: Request):
                     bot.open_posicoes()
                     bot.open_vehicle_selector()
                     bot.load_vehicle_list(placa="PCE7B03")
+                    n = bot._count_vehicle_items()
                     bot._trace(
-                        "calibragem_ok",
-                        "Chegou no modal de veículos — calibração parcial OK",
+                        "calibragem_lista",
+                        f"Lista com {n} veículo(s) — lupa só se estiver vazia",
                     )
+                    # tenta marcar PCE7B03 e Select (próximo passo da calibração)
+                    try:
+                        bot.select_vehicle_by_plate("PCE7B03")
+                        bot._trace(
+                            "calibragem_ok",
+                            "Select PCE7B03 OK — calibração avançada",
+                        )
+                    except Exception as e:
+                        bot._trace(
+                            "calibragem_select_falhou",
+                            str(e),
+                            ok=False,
+                        )
+                        raise
             debug_session.finish_run(ok=True)
         except Exception as e:
             debug_session.finish_run(ok=False, error=str(e))
