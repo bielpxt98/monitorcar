@@ -62,9 +62,9 @@ def sitrax_configured() -> bool:
 @app.get("/", response_class=HTMLResponse)
 async def home(request: Request):
     return templates.TemplateResponse(
+        request,
         "index.html",
         {
-            "request": request,
             "configured": sitrax_configured(),
             "today": date.today().isoformat(),
             "error": None,
@@ -209,9 +209,9 @@ async def gerar(
             error = f"{type(e).__name__}: {e}"
 
     return templates.TemplateResponse(
+        request,
         "index.html",
         {
-            "request": request,
             "configured": sitrax_configured(),
             "today": date.today().isoformat(),
             "error": error,
