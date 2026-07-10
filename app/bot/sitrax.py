@@ -451,99 +451,181 @@ class SitraxBot:
         except Exception:
             logger.warning("Não abriu sidebar — tentando clicar nos itens mesmo assim")
 
+    def _norm(self, s: str) -> str:
+        """Remove acentos e lowercase para comparação."""
+        import unicodedata
+
+        s = unicodedata.normalize("NFKD", s or "")
+        s = "".join(c for c in s if not unicodedata.combining(c))
+        return s.lower()
+
     def _posicoes_screen_ready(self) -> bool:
-        """Detecta se a tela de Histórico de Posições já abriu."""
+        """Detecta se a tela de Histórico de Posições já abriu (headless-friendly)."""
         d = self._d()
         try:
-            body = d.find_element(By.TAG_NAME, "body").text
+            body = d.find_element(By.TAG_NAME, "body").text or ""
         except Exception:
             body = ""
-        strong = [
-            "Histórico de Posições",
-            "Historico de Posicoes",
-            "Histórico de Posicoes",
-        ]
-        if any(m in body for m in strong):
+        bn = self._norm(body)
+
+        # título da tela
+        if "historico de posic" in bn:
             return True
-        # botão de filtro de veículo costuma só existir nessa tela
-        for xp in [
-            "//*[contains(normalize-space(.),'Histórico de Posições')]",
-            "//*[contains(@id,'RelatorioPosicao') and contains(@class,'Clicked')]",
-            "//button[contains(.,'Veículo') or contains(.,'Veiculo')]",
-            "//a[contains(.,'Veículo') or contains(.,'Veiculo')]",
-        ]:
-            try:
-                els = d.find_elements(By.XPATH, xp)
-                if any(e.is_displayed() for e in els):
-                    # evita falso positivo no menu lateral "Veículos" de monitoramento
-                    if "Histórico" in body or "Historico" in body or "Filtros" in body:
-                        return True
-            except Exception:
-                continue
+
+        # barra de filtros típica dessa tela: Filtros + Data + Filtrar
+        # (e não é o Dashboard de pizza)
+        has_filtros = "filtros" in bn
+        has_data = "data:" in bn or "data :" in bn or re.search(r"\d{2}/\d{2}/\d{4}", body)
+        has_filtrar = "filtrar" in bn
+        is_dashboard = "dashboard" in bn and "ignicao" in bn and "sem conexao" in bn
+
+        if has_filtros and has_filtrar and has_data and not is_dashboard:
+            return True
+
+        # botão Veículo na barra de filtro (não o menu MONITORAMENTO > Veículos)
+        try:
+            for el in d.find_elements(
+                By.XPATH,
+                "//*[normalize-space()='Veículo' or normalize-space()='Veiculo']",
+            ):
+                if el.is_displayed() and (has_filtros or has_filtrar):
+                    return True
+        except Exception:
+            pass
+
+        # item de menu marcado como clicado
+        try:
+            el = d.find_element(By.ID, "formTemplate:sbRelatorioPosicao")
+            cls = el.get_attribute("class") or ""
+            if "Clicked" in cls or "clicked" in cls:
+                # menu marcado — espera conteúdo
+                if has_filtros or "posic" in bn:
+                    return True
+        except Exception:
+            pass
+
         return False
+
+    def _jsf_click_posicoes(self) -> bool:
+        """Navega via JSF/Mojarra (mais confiável no headless que click visual)."""
+        d = self._d()
+        try:
+            ok = d.execute_script(
+                """
+                try {
+                  var form = document.getElementById('formTemplate');
+                  if (form && typeof mojarra !== 'undefined' && mojarra.jsfcljs) {
+                    mojarra.jsfcljs(form, {
+                      'formTemplate:sbRelatorioPosicao': 'formTemplate:sbRelatorioPosicao'
+                    }, '');
+                    return 'mojarra';
+                  }
+                  var el = document.getElementById('formTemplate:sbRelatorioPosicao');
+                  if (el) {
+                    if (typeof jsf !== 'undefined' && jsf.util && jsf.util.chain) {
+                      el.click();
+                      return 'click';
+                    }
+                    el.click();
+                    return 'click';
+                  }
+                  return false;
+                } catch (e) {
+                  return 'err:' + e;
+                }
+                """
+            )
+            logger.info("JSF navigate Posições: %s", ok)
+            return bool(ok) and not str(ok).startswith("err")
+        except Exception as e:
+            logger.warning("JSF navigate falhou: %s", e)
+            return False
 
     def open_posicoes(self) -> None:
         """Navega para Históricos → Posições (JSF: formTemplate:sbRelatorioPosicao)."""
         d = self._d()
-        self._sleep(1)
+        self._sleep(2)
 
         if self._posicoes_screen_ready():
             logger.info("Já está na tela de Posições")
             return
 
-        self._open_side_menu()
-        self._sleep(0.5)
+        last_err = None
+        for attempt in range(3):
+            logger.info("Abrindo Posições (tentativa %s/3)", attempt + 1)
+            self._open_side_menu()
+            self._sleep(0.8)
 
-        # Expandir seção HISTÓRICOS se necessário
-        try:
-            btn_hist = d.find_element(By.ID, "btnHistorico")
-            d.execute_script("arguments[0].click();", btn_hist)
-            self._sleep(0.4)
-        except Exception:
-            self._click_by_text(["HISTÓRICOS", "Históricos"], timeout=3)
-
-        # Clique principal por ID (descoberto no HTML do Sitrax)
-        ok = self._js_click_id("formTemplate:sbRelatorioPosicao")
-        if not ok:
-            # fallback texto
-            ok = self._click_by_text(["Posições", "Posicoes"], timeout=5)
-
-        if not ok:
-            self._save_debug("posicoes_id_nao_encontrado")
-            raise TimeoutException(
-                "Não achou o botão Posições (formTemplate:sbRelatorioPosicao). "
-                f"Veja {DEBUG_DIR}"
-            )
-
-        self._wait_loader_gone(40)
-        self._sleep(1.5)
-
-        # fecha sidebar se cobrir a tela
-        try:
-            d.execute_script(
-                "if (typeof swCloseSidebar === 'function') { swCloseSidebar(); }"
-            )
-        except Exception:
-            pass
-        self._sleep(0.5)
-
-        if not self._posicoes_screen_ready():
-            self._save_debug("posicoes_apos_clique")
-            # ainda tenta: às vezes o título demora
-            for _ in range(10):
-                if self._posicoes_screen_ready():
-                    break
+            # Expandir HISTÓRICOS
+            try:
+                btn_hist = d.find_element(By.ID, "btnHistorico")
+                d.execute_script("arguments[0].click();", btn_hist)
                 self._sleep(0.5)
+            except Exception:
+                self._click_by_text(["HISTÓRICOS", "Históricos", "Historicos"], timeout=3)
 
-        if not self._posicoes_screen_ready():
-            self._save_debug("posicoes_nao_confirmada")
-            raise TimeoutException(
-                "Clicou em Posições mas a tela não abriu. "
-                f"Veja a foto em {DEBUG_DIR}"
-            )
+            # Garante item no DOM (mesmo off-screen)
+            try:
+                d.execute_script(
+                    """
+                    var m = document.getElementById('sidebar-menu');
+                    if (m) {
+                      m.classList.remove('-translate-x-full');
+                      m.style.transform = 'translateX(0)';
+                      m.style.visibility = 'visible';
+                      m.style.display = 'block';
+                    }
+                    """
+                )
+            except Exception:
+                pass
+            self._sleep(0.3)
 
-        logger.info("Tela de Posições aberta")
-        self._save_debug("posicoes_ok")
+            ok = self._jsf_click_posicoes()
+            if not ok:
+                ok = self._js_click_id("formTemplate:sbRelatorioPosicao")
+            if not ok:
+                ok = self._click_by_text(["Posições", "Posicoes"], timeout=5)
+
+            if not ok:
+                last_err = "botão Posições não encontrado"
+                self._save_debug(f"posicoes_id_tentativa_{attempt}")
+                self._sleep(1)
+                continue
+
+            # JSF postback / AJAX — espera mais no Railway
+            self._sleep(2)
+            self._wait_loader_gone(50)
+            self._sleep(2)
+
+            try:
+                d.execute_script(
+                    "if (typeof swCloseSidebar === 'function') { swCloseSidebar(); }"
+                )
+            except Exception:
+                pass
+
+            for _ in range(20):
+                if self._posicoes_screen_ready():
+                    logger.info("Tela de Posições aberta")
+                    self._save_debug("posicoes_ok")
+                    return
+                self._sleep(0.6)
+
+            last_err = "tela não confirmada após clique"
+            self._save_debug(f"posicoes_nao_confirmada_{attempt}")
+            # tenta reload da welcome e de novo
+            try:
+                if "welcome" in d.current_url or "secure" in d.current_url:
+                    d.refresh()
+                    self._sleep(3)
+            except Exception:
+                pass
+
+        raise TimeoutException(
+            f"Clicou em Posições mas a tela não abriu ({last_err}). "
+            f"Veja {DEBUG_DIR}"
+        )
 
     def _close_date_popup_if_open(self) -> None:
         """Fecha o popup 'Filtro Data' se estiver aberto (evita clicar errado)."""
