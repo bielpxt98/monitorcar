@@ -123,9 +123,10 @@
           </label>
         </div>
 
-        <label for="placa">Placa (só se for 1 veículo)</label>
+        <label for="placa">Placa (obrigatória se for <strong>1 veículo</strong>; deixe vazio em Todos)</label>
         <input id="placa" name="placa" type="text" placeholder="Ex: PCE7B03"
-               value="{{ placa or '' }}" style="text-transform:uppercase" />
+               value="{{ placa or '' }}" style="text-transform:uppercase"
+               autocomplete="off" />
 
         <div style="display:grid;grid-template-columns:1fr 1fr;gap:.65rem">
           <div>

@@ -83,85 +83,150 @@ def _run_job(modo: str, placa: str, d_ini: date, d_fim: date):
         TempWorkspace,
     )
     from app.bot.sitrax import SitraxBot
+    from app.bot import debug_session
 
     data_ref = d_ini.strftime("%d/%m/%Y")
     if d_fim != d_ini:
         data_ref += f" a {d_fim.strftime('%d/%m/%Y')}"
 
+    placa_u = (placa or "").strip().upper()
+    # se digitar TODOS/ALL no campo placa, trata como frota inteira
+    if placa_u in ("TODOS", "TODAS", "ALL", "FROTA", "*"):
+        modo = "todos"
+        placa_u = ""
+
     if modo == "placa":
+        if not placa_u:
+            raise ValueError("Informe a placa do veículo.")
         return generate_vehicle_report_cloud(
-            placa=placa.strip(),
+            placa=placa_u,
             data_ini=d_ini,
             data_fim=d_fim,
             headless=True,
         )
 
-    # todos: gera um PDF multi-página em memória (ainda 1 arquivo)
+    # ——— TODOS: percorre a frota; 1 PDF com resumo de cada placa ———
     from app.bot.summary_pdf import build_summary_pdf_bytes, safe_filename
     from app.bot.report import build_narrative_report
-    from pypdf import PdfWriter
+    from app.bot.pdf_parser import positions_from_pdf
+    from pypdf import PdfWriter, PdfReader
     import io
 
-    textos = []
+    debug_session.start_run(placa="FROTA")
+    textos: list[str] = []
     pdf_writer = PdfWriter()
+    total_pontos = 0
 
-    with TempWorkspace(prefix="sitrax_all_") as tmp:
-        with SitraxBot(headless=True, download_dir=tmp) as bot:
-            bot.login()
-            vehicles = bot.get_all_plates()
-            if not vehicles:
-                # se modal listou vazio, tenta abrir de novo
+    try:
+        with TempWorkspace(prefix="sitrax_frota_") as tmp:
+            with SitraxBot(headless=True, download_dir=tmp) as bot:
+                bot.login()
                 bot.open_posicoes()
                 bot.open_vehicle_selector()
                 bot.load_vehicle_list()
                 vehicles = bot.list_plates()
-
-            for v in vehicles:
-                pl = v["placa"]
+                # fecha modal se aberto
                 try:
+                    bot._d().execute_script(
+                        "if (typeof hideModalSearchVeiculo === 'function') "
+                        "hideModalSearchVeiculo();"
+                    )
+                except Exception:
+                    pass
+
+                if not vehicles:
+                    debug_session.step(
+                        "frota_vazia",
+                        "Nenhum veículo listado no modal",
+                        ok=False,
+                        screenshot=True,
+                        driver=bot._d(),
+                    )
+                    raise RuntimeError(
+                        "Não achei a lista de veículos da frota. "
+                        "Tente 1 placa ou use o upload de PDF."
+                    )
+
+                debug_session.step(
+                    "frota_lista",
+                    f"{len(vehicles)} veículo(s): "
+                    + ", ".join(v["placa"] for v in vehicles[:20]),
+                    ok=True,
+                    screenshot=False,
+                )
+
+                for i, v in enumerate(vehicles):
+                    pl = v["placa"]
+                    if pl in ("TODOS", "TODAS", "ALL", "FROTA"):
+                        continue
+                    debug_session.step(
+                        f"frota_{i+1}_{pl}",
+                        f"Processando {i+1}/{len(vehicles)}: {pl}",
+                        ok=True,
+                        screenshot=False,
+                    )
                     try:
-                        pdf_bruto = bot.download_historico_pdf(
-                            pl, data_ini=d_ini, data_fim=d_fim, dest_dir=tmp
+                        pdf_bruto = None
+                        try:
+                            pdf_bruto = bot.download_historico_pdf(
+                                pl, data_ini=d_ini, data_fim=d_fim, dest_dir=tmp
+                            )
+                        except Exception as e:
+                            logger.warning("Download %s: %s", pl, e)
+
+                        if pdf_bruto and Path(pdf_bruto).exists():
+                            _, positions = positions_from_pdf(pdf_bruto)
+                        else:
+                            positions = bot.get_positions_for_plate(
+                                pl, data_ini=d_ini, data_fim=d_fim
+                            )
+
+                        total_pontos += len([p for p in positions if p.when])
+                        textos.append(
+                            build_narrative_report(
+                                pl,
+                                positions,
+                                data_ref=data_ref,
+                                cliente=v.get("cliente", ""),
+                            )
                         )
-                        from app.bot.pdf_parser import positions_from_pdf
-
-                        _, positions = positions_from_pdf(pdf_bruto)
-                    except Exception:
-                        positions = bot.get_positions_for_plate(
-                            pl, data_ini=d_ini, data_fim=d_fim
+                        one = build_summary_pdf_bytes(
+                            pl,
+                            positions,
+                            data_ref=data_ref,
+                            cliente=v.get("cliente", ""),
+                        )
+                        reader = PdfReader(io.BytesIO(one))
+                        for page in reader.pages:
+                            pdf_writer.add_page(page)
+                    except Exception as e:
+                        logger.exception("Falha em %s", pl)
+                        textos.append(f"📋 {pl}: erro — {e}")
+                        debug_session.step(
+                            f"frota_erro_{pl}", str(e), ok=False, screenshot=False
                         )
 
-                    textos.append(
-                        build_narrative_report(
-                            pl, positions, data_ref=data_ref, cliente=v.get("cliente", "")
-                        )
-                    )
-                    one = build_summary_pdf_bytes(
-                        pl, positions, data_ref=data_ref, cliente=v.get("cliente", "")
-                    )
-                    from pypdf import PdfReader
+        out = io.BytesIO()
+        if len(pdf_writer.pages) == 0:
+            one = build_summary_pdf_bytes("FROTA", [], data_ref=data_ref)
+            pdf_bytes = one
+        else:
+            pdf_writer.write(out)
+            pdf_bytes = out.getvalue()
 
-                    reader = PdfReader(io.BytesIO(one))
-                    for page in reader.pages:
-                        pdf_writer.add_page(page)
-                except Exception as e:
-                    logger.exception("Falha em %s", pl)
-                    textos.append(f"📋 {pl}: erro — {e}")
-
-        # tmp apagado aqui (PDFs brutos do Sitrax sumiram)
-
-    out = io.BytesIO()
-    pdf_writer.write(out)
-    pdf_bytes = out.getvalue()
-    texto = "\n\n".join(textos) if textos else "Nenhum veículo processado."
-    return ReportResult(
-        placa="FROTA",
-        data_ref=data_ref,
-        texto=texto,
-        pdf_bytes=pdf_bytes if pdf_bytes else build_summary_pdf_bytes("FROTA", [], data_ref),
-        pdf_filename=safe_filename("FROTA", data_ref),
-        pontos=0,
-    )
+        texto = "\n\n".join(textos) if textos else "Nenhum veículo processado."
+        debug_session.finish_run(ok=True)
+        return ReportResult(
+            placa="FROTA",
+            data_ref=data_ref,
+            texto=texto,
+            pdf_bytes=pdf_bytes,
+            pdf_filename=safe_filename("FROTA", data_ref),
+            pontos=total_pontos,
+        )
+    except Exception as e:
+        debug_session.finish_run(ok=False, error=str(e))
+        raise
 
 
 @app.get("/gerar")
