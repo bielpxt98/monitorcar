@@ -127,7 +127,9 @@ def generate_vehicle_report_cloud(
     try:
         with TempWorkspace(prefix=f"sitrax_{placa}_") as tmp:
             # Chrome baixa PDF BRUTO só em tmp (nunca no celular)
-            with SitraxBot(headless=headless, download_dir=tmp) as bot:
+            with SitraxBot(
+                headless=headless, download_dir=tmp, quiet=True, low_memory=True
+            ) as bot:
                 bot.login()
                 # 1) Filtra histórico  2) tenta PDF  3) se falhar, lê tabela já na tela
                 bot._prepare_historico_filtrado(placa, data_ini, data_fim)
