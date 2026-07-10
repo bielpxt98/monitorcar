@@ -566,8 +566,8 @@ class SitraxBot:
             "formmodalsearchveiculo",
             "sbrelatorioposicao",
         ]
-        # idFiltroCveiPlaca só no modal de veículo — mas "Filtrar" + chip Data é da tela
-        if "historico de posic" in blob:
+        # PT + EN (no Railway o Sitrax abriu em inglês: "Position History")
+        if "historico de posic" in blob or "position history" in blob:
             return True
 
         # menu item marcado
@@ -575,47 +575,41 @@ class SitraxBot:
             el = d.find_element(By.ID, "formTemplate:sbRelatorioPosicao")
             cls = (el.get_attribute("class") or "").lower()
             if "clicked" in cls:
-                # se saiu do dashboard de pizzas
-                if "sem conexao" not in blob or "filtrar" in blob:
-                    if "filtrar" in blob or "filtros" in blob:
+                if "sem conexao" not in blob or "filtrar" in blob or "filter" in blob:
+                    if "filtrar" in blob or "filtros" in blob or "filters" in blob or "filter" in blob:
                         return True
         except Exception:
             pass
 
-        has_filtros = "filtros" in blob
-        has_filtrar = "filtrar" in blob
-        has_veiculo_chip = (
-            "veiculo" in blob or "veículo" in self._page_blob().lower()
-        )
-        # barra: Filtros | Veículo | Data | Filtrar
+        has_filtros = "filtros" in blob or "filters" in blob
+        has_filtrar = "filtrar" in blob or re.search(r"\bfilter\b", blob)
+        has_veiculo_chip = "veiculo" in blob or "vehicle" in blob
+        # barra PT/EN: Filtros|Filters · Veículo|Vehicle · Data|Date · Filtrar|Filter
         if has_filtros and has_filtrar and has_veiculo_chip:
-            # evita dashboard: pizzas de ignição
             if "ignicao" in blob and "sem conexao" in blob and "ocorrencias" in blob:
-                if "historico" not in blob and "data:" not in blob:
+                if "historico" not in blob and "position history" not in blob and "data:" not in blob and "date:" not in blob:
                     return False
             return True
 
-        # elementos DOM específicos
         for css in (
             "#itFiltroCveiPlaca",
             "input[id='formModalSearchVeiculo:itCveiPlaca']",
         ):
             try:
                 if d.find_elements(By.CSS_SELECTOR, css):
-                    # modal de veículo aberto implica que já estamos em posições
                     return True
             except Exception:
                 pass
 
         for xp in (
-            "//*[contains(.,'Histórico de Posições') or contains(.,'Historico de Posicoes')]",
-            "//*[normalize-space()='Filtros']",
-            "//button[contains(.,'Filtrar')]",
+            "//*[contains(.,'Histórico de Posições') or contains(.,'Historico de Posicoes') or contains(.,'Position History')]",
+            "//*[normalize-space()='Filtros' or normalize-space()='Filters']",
+            "//button[contains(.,'Filtrar') or contains(.,'Filter')]",
         ):
             try:
                 els = d.find_elements(By.XPATH, xp)
                 if any(e.is_displayed() for e in els):
-                    if "filtrar" in blob or "filtros" in blob:
+                    if "filtrar" in blob or "filtros" in blob or "filter" in blob or "filters" in blob:
                         return True
             except Exception:
                 continue
