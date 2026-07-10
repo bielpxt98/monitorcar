@@ -84,7 +84,11 @@ class SitraxBot:
             )
         opts = Options()
         if self.headless:
+            # headless "new" com viewport desktop (layout igual ao PC, não mobile)
             opts.add_argument("--headless=new")
+        else:
+            # local: janela grande, NÃO minimizada
+            opts.add_argument("--start-maximized")
         # Flags críticas para Docker/Railway (evita "tab crashed" por /dev/shm e RAM)
         opts.add_argument("--no-sandbox")
         opts.add_argument("--disable-dev-shm-usage")
@@ -99,13 +103,23 @@ class SitraxBot:
         opts.add_argument("--mute-audio")
         opts.add_argument("--no-first-run")
         opts.add_argument("--safebrowsing-disable-auto-update")
-        opts.add_argument("--window-size=1280,800")
+        # viewport DESKTOP — o Sitrax esconde "Veículo"/filtros em largura pequena
+        opts.add_argument("--window-size=1920,1080")
+        opts.add_argument("--window-position=0,0")
+        opts.add_argument("--force-device-scale-factor=1")
+        opts.add_argument("--high-dpi-support=1")
         opts.add_argument("--lang=pt-BR")
         opts.add_argument("--disable-blink-features=AutomationControlled")
         opts.add_argument("--disable-notifications")
         opts.add_argument("--disable-popup-blocking")
-        opts.add_argument("--renderer-process-limit=1")
-        opts.add_argument("--js-flags=--max-old-space-size=256")
+        opts.add_argument("--renderer-process-limit=2")
+        opts.add_argument("--js-flags=--max-old-space-size=384")
+        # user-agent desktop (evita layout mobile no headless)
+        opts.add_argument(
+            "--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/120.0.0.0 Safari/537.36"
+        )
         # perfil/cache em temp (Docker/Railway e Windows)
         import tempfile as _tmpmod
 
@@ -148,6 +162,38 @@ class SitraxBot:
         self.wait = WebDriverWait(self.driver, 45)
         self.driver.set_page_load_timeout(90)
 
+        # Força tela DESKTOP (não minimizada / não mobile)
+        try:
+            if not self.headless:
+                try:
+                    self.driver.maximize_window()
+                except Exception:
+                    self.driver.set_window_rect(0, 0, 1920, 1080)
+            else:
+                self.driver.set_window_size(1920, 1080)
+        except Exception as e:
+            logger.warning("Ajuste de janela: %s", e)
+
+        # CDP: viewport desktop fixo (headless e Docker)
+        try:
+            self.driver.execute_cdp_cmd(
+                "Emulation.setDeviceMetricsOverride",
+                {
+                    "width": 1920,
+                    "height": 1080,
+                    "deviceScaleFactor": 1,
+                    "mobile": False,
+                    "screenWidth": 1920,
+                    "screenHeight": 1080,
+                },
+            )
+            self.driver.execute_cdp_cmd(
+                "Emulation.setTouchEmulationEnabled",
+                {"enabled": False},
+            )
+        except Exception as e:
+            logger.warning("CDP desktop viewport: %s", e)
+
         # Chrome headless: força download dir via CDP
         if self.download_dir:
             try:
@@ -160,6 +206,12 @@ class SitraxBot:
                 )
             except Exception as e:
                 logger.warning("CDP download path: %s", e)
+
+        self._trace(
+            "chrome_pronto",
+            f"Chrome desktop 1920x1080 headless={self.headless}",
+            shot=True,
+        )
 
     def close(self) -> None:
         if self.driver:
