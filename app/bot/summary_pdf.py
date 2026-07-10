@@ -5,13 +5,16 @@ from __future__ import annotations
 import io
 import re
 from datetime import date, datetime
+from pathlib import Path
 from typing import Optional
 
 from reportlab.lib import colors
+from reportlab.lib.colors import Color
 from reportlab.lib.enums import TA_CENTER, TA_LEFT
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
 from reportlab.lib.units import cm, mm
+from reportlab.lib.utils import ImageReader
 from reportlab.platypus import (
     Paragraph,
     SimpleDocTemplate,
@@ -27,6 +30,98 @@ from app.bot.report import (
     format_time,
 )
 
+# Mesma arte da home do app
+_BG_CANDIDATES = (
+    Path(__file__).resolve().parents[1] / "static" / "bg-hero.jpg",
+    Path(__file__).resolve().parents[2] / "static" / "bg-hero.jpg",
+    Path(__file__).resolve().parents[2] / "app" / "static" / "bg-hero.jpg",
+)
+
+
+def _bg_image_path() -> Optional[Path]:
+    for p in _BG_CANDIDATES:
+        if p.is_file():
+            return p
+    return None
+
+
+def _draw_page_background(canvas, doc) -> None:
+    """Foto de fundo (bg-hero) + véu + cartão claro para o texto."""
+    page_w, page_h = A4
+    canvas.saveState()
+
+    bg = _bg_image_path()
+    if bg is not None:
+        try:
+            img = ImageReader(str(bg))
+            iw, ih = img.getSize()
+            if iw > 0 and ih > 0:
+                # cover: preenche a página inteira
+                scale = max(page_w / iw, page_h / ih)
+                tw, th = iw * scale, ih * scale
+                x = (page_w - tw) / 2.0
+                y = (page_h - th) / 2.0
+                canvas.drawImage(
+                    img,
+                    x,
+                    y,
+                    width=tw,
+                    height=th,
+                    mask="auto",
+                    preserveAspectRatio=True,
+                    anchor="c",
+                )
+        except Exception:
+            # se a imagem falhar, só o fundo sólido
+            canvas.setFillColor(colors.HexColor("#0f1221"))
+            canvas.rect(0, 0, page_w, page_h, fill=1, stroke=0)
+    else:
+        canvas.setFillColor(colors.HexColor("#0f1221"))
+        canvas.rect(0, 0, page_w, page_h, fill=1, stroke=0)
+
+    # véu escuro (estilo app) — a foto aparece nas bordas
+    canvas.setFillColor(Color(0.06, 0.07, 0.13, alpha=0.42))
+    canvas.rect(0, 0, page_w, page_h, fill=1, stroke=0)
+
+    # cartão branco semi-transparente onde o conteúdo fica legível
+    margin_x = 1.05 * cm
+    margin_y = 1.05 * cm
+    canvas.setFillColor(Color(1, 1, 1, alpha=0.93))
+    canvas.setStrokeColor(Color(1, 1, 1, alpha=0.5))
+    canvas.setLineWidth(0.6)
+    canvas.roundRect(
+        margin_x,
+        margin_y,
+        page_w - 2 * margin_x,
+        page_h - 2 * margin_y,
+        14,
+        fill=1,
+        stroke=1,
+    )
+
+    # faixa laranja decorativa no topo do cartão
+    canvas.setFillColor(colors.HexColor("#ff6b00"))
+    canvas.roundRect(
+        margin_x,
+        page_h - margin_y - 0.45 * cm,
+        page_w - 2 * margin_x,
+        0.45 * cm,
+        4,
+        fill=1,
+        stroke=0,
+    )
+    # “cobre” cantos inferiores da faixa (retângulo)
+    canvas.rect(
+        margin_x,
+        page_h - margin_y - 0.45 * cm,
+        page_w - 2 * margin_x,
+        0.22 * cm,
+        fill=1,
+        stroke=0,
+    )
+
+    canvas.restoreState()
+
 
 def build_summary_pdf_bytes(
     placa: str,
@@ -36,17 +131,18 @@ def build_summary_pdf_bytes(
     titulo: str = "Resumo de Rota",
 ) -> bytes:
     """
-    PDF limpo e curto: horários por cidade.
+    PDF limpo e curto: horários por cidade + foto de fundo do app.
     NÃO é o histórico completo do Sitrax.
     """
     buffer = io.BytesIO()
+    # margens um pouco maiores por causa do cartão arredondado
     doc = SimpleDocTemplate(
         buffer,
         pagesize=A4,
-        leftMargin=1.6 * cm,
-        rightMargin=1.6 * cm,
-        topMargin=1.4 * cm,
-        bottomMargin=1.4 * cm,
+        leftMargin=1.9 * cm,
+        rightMargin=1.9 * cm,
+        topMargin=2.0 * cm,
+        bottomMargin=1.8 * cm,
         title=f"{titulo} — {placa}",
     )
 
@@ -54,10 +150,11 @@ def build_summary_pdf_bytes(
     title_style = ParagraphStyle(
         "TitleBR",
         parent=styles["Heading1"],
-        fontSize=16,
+        fontSize=17,
         alignment=TA_CENTER,
         spaceAfter=6,
         textColor=colors.HexColor("#1a1f35"),
+        fontName="Helvetica-Bold",
     )
     sub_style = ParagraphStyle(
         "SubBR",
@@ -78,7 +175,7 @@ def build_summary_pdf_bytes(
         "FootBR",
         parent=styles["Normal"],
         fontSize=8,
-        textColor=colors.HexColor("#9ca3af"),
+        textColor=colors.HexColor("#6b7280"),
         alignment=TA_CENTER,
     )
 
@@ -96,7 +193,6 @@ def build_summary_pdf_bytes(
     story.append(Paragraph(" &nbsp;|&nbsp; ".join(header_bits), sub_style))
     story.append(Spacer(1, 4 * mm))
 
-    # Ignition line
     ign_lines = []
     if ligou:
         ign_lines.append(f"Ligou às <b>{format_time(ligou)}</b>")
@@ -107,7 +203,6 @@ def build_summary_pdf_bytes(
         story.append(Paragraph(" &nbsp;·&nbsp; ".join(ign_lines), body_style))
         story.append(Spacer(1, 6 * mm))
 
-    # Table of segments
     if not segments:
         story.append(
             Paragraph(
@@ -129,7 +224,7 @@ def build_summary_pdf_bytes(
                 ]
             )
 
-        table = Table(data, colWidths=[2.8 * cm, 2.8 * cm, 11 * cm])
+        table = Table(data, colWidths=[2.6 * cm, 2.6 * cm, 10.2 * cm])
         table.setStyle(
             TableStyle(
                 [
@@ -164,7 +259,11 @@ def build_summary_pdf_bytes(
         )
     )
 
-    doc.build(story)
+    doc.build(
+        story,
+        onFirstPage=_draw_page_background,
+        onLaterPages=_draw_page_background,
+    )
     return buffer.getvalue()
 
 
