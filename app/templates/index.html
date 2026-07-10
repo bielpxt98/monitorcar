@@ -35,13 +35,9 @@
       background-attachment: fixed;
     }
     .wrap { max-width: 480px; margin: 0 auto; position: relative; z-index: 1; }
-    .card {
-      backdrop-filter: blur(10px);
-      background: rgba(26, 31, 53, 0.88) !important;
-    }
     header { margin-bottom: 1.25rem; }
-    h1 { margin: 0; font-size: 1.35rem; }
-    header p { margin: .35rem 0 0; color: var(--muted); font-size: .9rem; line-height: 1.4; }
+    h1 { margin: 0; font-size: 1.35rem; text-shadow: 0 2px 12px rgba(0,0,0,.45); }
+    header p { margin: .35rem 0 0; color: var(--muted); font-size: .9rem; line-height: 1.4; text-shadow: 0 1px 8px rgba(0,0,0,.4); }
     .card {
       background: rgba(26, 31, 53, 0.88);
       border: 1px solid var(--border);
@@ -49,6 +45,7 @@
       padding: 1.15rem;
       margin-bottom: 1rem;
       backdrop-filter: blur(10px);
+      box-shadow: 0 8px 32px rgba(0,0,0,.35);
     }
     .card h2 { margin: 0 0 .75rem; font-size: 1rem; }
     .badge {
