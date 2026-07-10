@@ -84,15 +84,34 @@ class SitraxBot:
         opts = Options()
         if self.headless:
             opts.add_argument("--headless=new")
-        opts.add_argument("--window-size=1400,900")
-        opts.add_argument("--disable-gpu")
+        # Flags críticas para Docker/Railway (evita "tab crashed" por /dev/shm e RAM)
         opts.add_argument("--no-sandbox")
+        opts.add_argument("--disable-dev-shm-usage")
+        opts.add_argument("--disable-gpu")
+        opts.add_argument("--disable-software-rasterizer")
+        opts.add_argument("--disable-extensions")
+        opts.add_argument("--disable-background-networking")
+        opts.add_argument("--disable-default-apps")
+        opts.add_argument("--disable-sync")
+        opts.add_argument("--disable-translate")
+        opts.add_argument("--metrics-recording-only")
+        opts.add_argument("--mute-audio")
+        opts.add_argument("--no-first-run")
+        opts.add_argument("--safebrowsing-disable-auto-update")
+        opts.add_argument("--window-size=1280,800")
         opts.add_argument("--lang=pt-BR")
         opts.add_argument("--disable-blink-features=AutomationControlled")
         opts.add_argument("--disable-notifications")
         opts.add_argument("--disable-popup-blocking")
+        opts.add_argument("--renderer-process-limit=1")
+        opts.add_argument("--js-flags=--max-old-space-size=256")
+        opts.add_argument("--user-data-dir=/tmp/chrome-user-data")
+        opts.add_argument("--data-path=/tmp/chrome-user-data")
+        opts.add_argument("--disk-cache-dir=/tmp/chrome-cache")
         # evita popups "Salvar senha?" / "Usar chave de acesso?" do Chrome
-        opts.add_experimental_option("excludeSwitches", ["enable-automation", "enable-logging"])
+        opts.add_experimental_option(
+            "excludeSwitches", ["enable-automation", "enable-logging"]
+        )
         prefs = {
             "credentials_enable_service": False,
             "profile.password_manager_enabled": False,
@@ -114,10 +133,15 @@ class SitraxBot:
             )
         opts.add_experimental_option("prefs", prefs)
 
-        service = Service(ChromeDriverManager().install())
-        self.driver = webdriver.Chrome(service=service, options=opts)
-        self.wait = WebDriverWait(self.driver, 30)
-        self.driver.set_page_load_timeout(60)
+        # Preferir Chrome do sistema (Docker); fallback webdriver-manager
+        try:
+            self.driver = webdriver.Chrome(options=opts)
+        except Exception as e:
+            logger.warning("Chrome default falhou (%s); tentando ChromeDriverManager", e)
+            service = Service(ChromeDriverManager().install())
+            self.driver = webdriver.Chrome(service=service, options=opts)
+        self.wait = WebDriverWait(self.driver, 45)
+        self.driver.set_page_load_timeout(90)
 
         # Chrome headless: força download dir via CDP
         if self.download_dir:
