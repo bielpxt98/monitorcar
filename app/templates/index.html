@@ -1,0 +1,190 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <meta name="theme-color" content="#0f1221" />
+  <title>Resumo de Rota</title>
+  <style>
+    :root {
+      --bg: #0f1221;
+      --card: #1a1f35;
+      --accent: #ff6b00;
+      --accent2: #a855f7;
+      --text: #f3f4f6;
+      --muted: #9ca3af;
+      --ok: #22c55e;
+      --err: #ef4444;
+      --border: #2d3548;
+    }
+    * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+    body {
+      margin: 0;
+      font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+      background: radial-gradient(900px 500px at 0% 0%, #3b0764 0%, transparent 50%),
+                  radial-gradient(700px 400px at 100% 0%, #7c2d12 0%, transparent 45%),
+                  var(--bg);
+      color: var(--text);
+      min-height: 100vh;
+      padding: 1rem;
+      padding-bottom: 2.5rem;
+    }
+    .wrap { max-width: 480px; margin: 0 auto; }
+    header { margin-bottom: 1.25rem; }
+    h1 { margin: 0; font-size: 1.35rem; }
+    header p { margin: .35rem 0 0; color: var(--muted); font-size: .9rem; line-height: 1.4; }
+    .card {
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 16px;
+      padding: 1.15rem;
+      margin-bottom: 1rem;
+    }
+    .badge {
+      display: inline-flex; align-items: center; gap: .35rem;
+      font-size: .75rem; padding: .2rem .6rem; border-radius: 999px; margin-bottom: .85rem;
+    }
+    .badge.ok { background: rgba(34,197,94,.15); color: var(--ok); }
+    .badge.err { background: rgba(239,68,68,.15); color: var(--err); }
+    label { display: block; font-size: .8rem; color: var(--muted); margin-bottom: .3rem; }
+    input[type=text], input[type=date] {
+      width: 100%; padding: .85rem .9rem; border-radius: 12px;
+      border: 1px solid var(--border); background: #0f1324; color: var(--text);
+      font-size: 1rem; margin-bottom: .9rem;
+    }
+    .modes { display: grid; grid-template-columns: 1fr 1fr; gap: .65rem; margin-bottom: 1rem; }
+    .mode {
+      border: 1px solid var(--border); border-radius: 12px; padding: .85rem;
+      background: #12172a; cursor: pointer;
+    }
+    .mode:has(input:checked) { border-color: var(--accent); background: rgba(255,107,0,.12); }
+    .mode input { margin-right: .4rem; }
+    .mode strong { display: block; margin-bottom: .15rem; font-size: .95rem; }
+    .mode span { font-size: .75rem; color: var(--muted); line-height: 1.3; }
+    .row { display: grid; grid-template-columns: 1fr 1fr; gap: .65rem; }
+    button[type=submit], .btn-pdf {
+      width: 100%; border: 0; border-radius: 12px; padding: 1rem;
+      font-size: 1.05rem; font-weight: 700; color: #fff; cursor: pointer;
+    }
+    button[type=submit] {
+      background: linear-gradient(90deg, var(--accent), #ff8c33);
+      box-shadow: 0 8px 24px rgba(255,107,0,.3);
+    }
+    button[type=submit]:disabled { opacity: .55; cursor: wait; }
+    .btn-pdf {
+      display: block; text-align: center; text-decoration: none;
+      background: linear-gradient(90deg, #7c3aed, var(--accent2));
+      margin-top: .75rem;
+    }
+    .hint { font-size: .78rem; color: var(--muted); margin-top: .75rem; line-height: 1.45; }
+    pre.result {
+      white-space: pre-wrap; word-break: break-word;
+      background: #0b0e1a; border: 1px solid var(--border); border-radius: 12px;
+      padding: 1rem; font-size: .88rem; line-height: 1.5; max-height: 50vh; overflow: auto;
+    }
+    pre.error {
+      white-space: pre-wrap; color: #fecaca; background: rgba(239,68,68,.08);
+      border: 1px solid rgba(239,68,68,.35); border-radius: 12px; padding: .9rem;
+      font-size: .8rem; max-height: 30vh; overflow: auto;
+    }
+    #loading { display: none; text-align: center; color: var(--muted); margin-top: .75rem; font-size: .9rem; }
+    .steps { font-size: .8rem; color: var(--muted); line-height: 1.5; }
+    .steps ol { padding-left: 1.15rem; margin: .4rem 0 0; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <header>
+      <h1>Resumo de Rota</h1>
+      <p>No celular você só recebe <strong>1 PDF de resumo</strong> (cidade e horários). Os arquivos brutos do rastreador ficam no servidor e são apagados.</p>
+    </header>
+
+    <div class="card">
+      {% if configured %}
+        <div class="badge ok">● Servidor conectado ao rastreador</div>
+      {% else %}
+        <div class="badge err">● Servidor sem credenciais</div>
+      {% endif %}
+
+      <form method="post" action="/gerar" id="form">
+        <div class="modes">
+          <label class="mode">
+            <input type="radio" name="modo" value="placa" {% if not modo or modo == 'placa' %}checked{% endif %} />
+            <strong>1 veículo</strong>
+            <span>Informe a placa</span>
+          </label>
+          <label class="mode">
+            <input type="radio" name="modo" value="todos" {% if modo == 'todos' %}checked{% endif %} />
+            <strong>Todos</strong>
+            <span>Frota inteira (mais lento)</span>
+          </label>
+        </div>
+
+        <label for="placa">Placa</label>
+        <input id="placa" name="placa" type="text" placeholder="Ex: PCE7B03"
+               value="{{ placa or '' }}" style="text-transform:uppercase" autocomplete="off" />
+
+        <div class="row">
+          <div>
+            <label for="data_ini">Data início</label>
+            <input id="data_ini" name="data_ini" type="date" value="{{ data_ini or today }}" />
+          </div>
+          <div>
+            <label for="data_fim">Data fim</label>
+            <input id="data_fim" name="data_fim" type="date" value="{{ data_fim or today }}" />
+          </div>
+        </div>
+
+        <button type="submit" id="btn">Gerar resumo</button>
+        <div id="loading">⏳ Buscando no rastreador e montando o resumo… pode levar alguns minutos. Não feche esta tela.</div>
+        <p class="hint">
+          O servidor entra no Sitrax, lê o histórico, monta o resumo e <strong>apaga os arquivos temporários</strong>.
+          No seu celular só fica o PDF do resumo (se você baixar).
+        </p>
+      </form>
+    </div>
+
+    {% if error %}
+    <div class="card">
+      <h2 style="margin:0 0 .6rem;font-size:1rem">Erro</h2>
+      <pre class="error">{{ error }}</pre>
+    </div>
+    {% endif %}
+
+    {% if texto or has_pdf %}
+    <div class="card">
+      <h2 style="margin:0 0 .6rem;font-size:1rem">Seu resumo</h2>
+      {% if has_pdf %}
+        <a class="btn-pdf" href="/baixar-resumo">⬇ Baixar PDF do resumo{% if pdf_name %} ({{ pdf_name }}){% endif %}</a>
+        <p class="hint">Este é o único arquivo para o celular — não é o histórico completo do rastreador.</p>
+      {% endif %}
+      {% if texto %}
+        <pre class="result" style="margin-top:.85rem">{{ texto }}</pre>
+      {% endif %}
+    </div>
+    {% endif %}
+
+    <div class="card steps">
+      <strong>Como funciona (nuvem)</strong>
+      <ol>
+        <li>Você escolhe 1 placa ou todos, no celular</li>
+        <li>O servidor consulta o rastreador (Sitrax)</li>
+        <li>Arquivos brutos ficam em pasta temporária no servidor</li>
+        <li>O servidor monta 1 PDF de resumo (cidade / horário)</li>
+        <li>Os arquivos brutos são <strong>apagados</strong></li>
+        <li>Você baixa só o resumo, se quiser</li>
+      </ol>
+    </div>
+  </div>
+  <script>
+    const form = document.getElementById('form');
+    const btn = document.getElementById('btn');
+    const loading = document.getElementById('loading');
+    form.addEventListener('submit', () => {
+      btn.disabled = true;
+      btn.textContent = 'Gerando…';
+      loading.style.display = 'block';
+    });
+  </script>
+</body>
+</html>

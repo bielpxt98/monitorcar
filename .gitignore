@@ -1,0 +1,17 @@
+.env
+.venv/
+venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.mypy_cache/
+playwright-report/
+test-results/
+*.log
+relatorio*.txt
+resumo_rota_*.pdf
+relatorio*.pdf
+debug/
+.DS_Store
+*.crdownload
+
