@@ -816,24 +816,22 @@ class SitraxBot:
                 var candidates = [];
                 for (var i = 0; i < nodes.length; i++) {
                   var el = nodes[i];
-                  // ignora menu lateral
                   if (el.closest && (el.closest('#sidebar-menu') || el.closest('#sidebar'))) continue;
                   var t = norm(el.innerText || el.textContent);
                   if (!t) continue;
-                  // só o chip "Veículo" / "Veiculo" (ou "Veículo: XXX" curto)
-                  if (t === 'Veículo' || t === 'Veiculo' ||
-                      /^Ve[ií]culo\\s*:/.test(t) ||
-                      (t.indexOf('Veículo') === 0 && t.length <= 24) ||
-                      (t.indexOf('Veiculo') === 0 && t.length <= 24)) {
-                    // evita blocos enormes
-                    var r = el.getBoundingClientRect();
-                    if (r.height > 100 || r.width > 500) continue;
-                    // evita clicar em "Data"
-                    if (/^Data/i.test(t) || t.indexOf('Data:') === 0) continue;
-                    candidates.push({el: el, t: t, w: r.width || 9999});
-                  }
+                  // PT: Veículo / EN: Vehicle (Sitrax no Railway usa inglês)
+                  var isVeic =
+                    t === 'Veículo' || t === 'Veiculo' || t === 'Vehicle' ||
+                    /^Ve[ií]culo\\s*:/.test(t) || /^Vehicle\\s*:/i.test(t) ||
+                    (t.indexOf('Veículo') === 0 && t.length <= 28) ||
+                    (t.indexOf('Veiculo') === 0 && t.length <= 28) ||
+                    (t.indexOf('Vehicle') === 0 && t.length <= 28);
+                  if (!isVeic) continue;
+                  var r = el.getBoundingClientRect();
+                  if (r.height > 100 || r.width > 500) continue;
+                  if (/^(Data|Date)\\b/i.test(t) || t.indexOf('Data:') === 0 || t.indexOf('Date:') === 0) continue;
+                  candidates.push({el: el, t: t, w: r.width || 9999});
                 }
-                // prefere o menor (chip da barra)
                 candidates.sort(function(a,b){ return a.w - b.w; });
                 if (candidates.length) {
                   var c = candidates[0].el;
@@ -846,24 +844,27 @@ class SitraxBot:
             )
             if result:
                 clicked = True
-                logger.info("Clicou em Veículo via JS: %s", result)
+                logger.info("Clicou em Vehicle/Veículo via JS: %s", result)
         except Exception as e:
-            logger.warning("JS clique Veículo: %s", e)
+            logger.warning("JS clique Veículo/Vehicle: %s", e)
 
-        # 2) Fallback Selenium clássico
+        # 2) Fallback Selenium clássico (PT + EN)
         if not clicked:
-            for el in d.find_elements(By.XPATH, "//*[contains(text(),'Veículo') or contains(text(),'Veiculo')]"):
+            for el in d.find_elements(
+                By.XPATH,
+                "//*[contains(text(),'Veículo') or contains(text(),'Veiculo') or contains(text(),'Vehicle')]",
+            ):
                 try:
                     t = (el.text or "").strip()
-                    if not t or t.startswith("Data"):
+                    if not t or t.startswith("Data") or t.startswith("Date"):
                         continue
-                    if "Veículo" not in t and "Veiculo" not in t:
+                    if not any(x in t for x in ("Veículo", "Veiculo", "Vehicle")):
                         continue
                     if len(t) > 30:
                         continue
                     d.execute_script("arguments[0].click();", el)
                     clicked = True
-                    logger.info("Clicou Veículo fallback: %s", t)
+                    logger.info("Clicou Vehicle/Veículo fallback: %s", t)
                     break
                 except Exception:
                     continue
@@ -871,26 +872,33 @@ class SitraxBot:
         if not clicked:
             self._save_debug(
                 "veiculo_botao_nao_encontrado",
-                "Botão Veículo NÃO encontrado — veja a foto no painel /debug",
+                "Botão Vehicle/Veículo NÃO encontrado — veja a foto no painel /debug",
                 ok=False,
             )
             raise TimeoutException(
-                "Não encontrou o botão 'Veículo' na barra de filtros. "
+                "Não encontrou o botão 'Vehicle'/'Veículo' na barra de filtros. "
                 "Abra /debug para ver a tela que o robô enxergou."
             )
 
         self._wait_loader_gone(25)
         self._sleep(1.0)
 
-        # modal "Selecione Veículo" ou input de placa do modal
+        # modal "Selecione Veículo" / "Select Vehicle" ou input de placa
         end = time.time() + 20
         modal_ok = False
         while time.time() < end:
             blob = self._norm(self._page_blob())
-            if "selecione veiculo" in blob or "formmodalsearchveiculo" in blob:
+            if (
+                "selecione veiculo" in blob
+                or "select vehicle" in blob
+                or "formmodalsearchveiculo" in blob
+            ):
                 modal_ok = True
                 break
-            if d.find_elements(By.CSS_SELECTOR, "#itFiltroCveiPlaca, input[id='formModalSearchVeiculo:itCveiPlaca']"):
+            if d.find_elements(
+                By.CSS_SELECTOR,
+                "#itFiltroCveiPlaca, input[id='formModalSearchVeiculo:itCveiPlaca']",
+            ):
                 modal_ok = True
                 break
             self._sleep(0.4)
@@ -898,10 +906,10 @@ class SitraxBot:
         if not modal_ok:
             self._save_debug("veiculo_modal_nao_abriu")
             blob = self._page_blob()
-            if "Filtro Data" in blob:
-                raise TimeoutException("Abriu filtro de DATA em vez de VEÍCULO.")
+            if "Filtro Data" in blob or "Date Filter" in blob or "Filter Date" in blob:
+                raise TimeoutException("Abriu filtro de DATA em vez de VEÍCULO/Vehicle.")
             raise TimeoutException(
-                "Clicou em Veículo mas o modal não abriu. "
+                "Clicou em Vehicle/Veículo mas o modal não abriu. "
                 f"Veja {DEBUG_DIR}"
             )
         logger.info("Modal de veículos aberto")
@@ -951,7 +959,7 @@ class SitraxBot:
             (By.CSS_SELECTOR, "div#itFiltroCveiPlaca i[onclick*=\"btnFiltrarVeiculo\"]"),
             (By.XPATH, "//div[@id='itFiltroCveiPlaca']//i[contains(@class,'fa-magnifying-glass')]"),
             (By.XPATH, "//input[@id='formModalSearchVeiculo:itCveiPlaca']/following-sibling::i[contains(@class,'magnifying')]"),
-            (By.XPATH, "//input[@placeholder='Placa']/following-sibling::i[contains(@class,'magnifying')]"),
+            (By.XPATH, "//input[@placeholder='Placa' or @placeholder='Plate' or @placeholder='placa']/following-sibling::i[contains(@class,'magnifying')]"),
         ]
         for by, sel in selectors:
             try:
@@ -1261,9 +1269,9 @@ class SitraxBot:
         for el in d.find_elements(
             By.XPATH,
             "//*[contains(@onclick,'selectVeiculoSearch')] | "
-            "//button[contains(.,'Selecionar')] | "
-            "//a[contains(.,'Selecionar')] | "
-            "//span[normalize-space()='Selecionar']/ancestor::*[self::button or self::a or self::div][1]",
+            "//button[contains(.,'Selecionar') or contains(.,'Select')] | "
+            "//a[contains(.,'Selecionar') or contains(.,'Select')] | "
+            "//span[normalize-space()='Selecionar' or normalize-space()='Select']/ancestor::*[self::button or self::a or self::div][1]",
         ):
             try:
                 if el.is_displayed():
@@ -1289,8 +1297,11 @@ class SitraxBot:
             body = d.find_element(By.TAG_NAME, "body").text
         except Exception:
             body = ""
-        if "Selecione Veículo" in body or "Selecione Veiculo" in body:
-            # ainda aberto — tenta hide de novo
+        if (
+            "Selecione Veículo" in body
+            or "Selecione Veiculo" in body
+            or "Select Vehicle" in body
+        ):
             try:
                 d.execute_script(
                     "if (typeof hideModalSearchVeiculo === 'function') hideModalSearchVeiculo();"
@@ -1299,9 +1310,12 @@ class SitraxBot:
             except Exception:
                 pass
             body = d.find_element(By.TAG_NAME, "body").text
-            if "Selecione Veículo" in body:
+            if (
+                "Selecione Veículo" in body
+                or "Select Vehicle" in body
+            ):
                 self._save_debug(f"modal_ainda_aberto_{placa_u}")
-                logger.warning("Modal ainda aberto após Selecionar")
+                logger.warning("Modal ainda aberto após Select/Selecionar")
 
         logger.info("Veículo %s selecionado com sucesso", placa_u)
         self._save_debug(f"veiculo_ok_{placa_u}")
@@ -1335,18 +1349,21 @@ class SitraxBot:
             logger.info("Data já está no filtro: %s → %s (sem clicar)", ini_br, fim_br)
             return
 
-        # Precisa mudar: clica no chip de Data (não em Veículo)
+        # Precisa mudar: clica no chip de Data/Date (não em Veículo/Vehicle)
         date_chip = None
         for el in d.find_elements(
             By.XPATH,
-            "//*[contains(normalize-space(.),'Data:') or starts-with(normalize-space(.),'Data')]",
+            "//*[contains(normalize-space(.),'Data:') or starts-with(normalize-space(.),'Data') "
+            "or contains(normalize-space(.),'Date:') or starts-with(normalize-space(.),'Date')]",
         ):
             try:
                 if not el.is_displayed():
                     continue
                 t = (el.text or "").strip()
-                if "Data" in t and re.search(r"\d{2}/\d{2}/\d{4}", t):
-                    # prefere o menor elemento possível
+                if (
+                    ("Data" in t or "Date" in t)
+                    and re.search(r"\d{2}/\d{2}/\d{4}", t)
+                ):
                     if el.size.get("height", 99) < 60:
                         date_chip = el
                         break
@@ -1356,7 +1373,7 @@ class SitraxBot:
                 continue
 
         if not date_chip:
-            logger.warning("Não achou chip de Data; mantendo data atual do sistema")
+            logger.warning("Não achou chip de Data/Date; mantendo data atual do sistema")
             return
 
         self._click(date_chip)
@@ -1382,8 +1399,11 @@ class SitraxBot:
             except Exception:
                 continue
 
-        # Filtrar dentro do popup de data
-        for el in d.find_elements(By.XPATH, "//button[normalize-space()='Filtrar']"):
+        # Filtrar / Filter dentro do popup de data
+        for el in d.find_elements(
+            By.XPATH,
+            "//button[normalize-space()='Filtrar' or normalize-space()='Filter']",
+        ):
             try:
                 if el.is_displayed():
                     self._click(el)
@@ -1396,38 +1416,39 @@ class SitraxBot:
         logger.info("Data filtro ajustada: %s → %s", ini_br, fim_br)
 
     def click_filtrar(self) -> None:
-        """Clica no botão laranja Filtrar da barra principal (não o do popup de data)."""
+        """Clica no botão laranja Filtrar/Filter da barra principal."""
         d = self._d()
         self._close_date_popup_if_open()
         btn = None
-        # preferir botão com ícone de lupa / laranja da barra
         for el in d.find_elements(
             By.XPATH,
-            "//button[contains(normalize-space(.),'Filtrar')] | //a[contains(normalize-space(.),'Filtrar')]",
+            "//button[contains(normalize-space(.),'Filtrar') or contains(normalize-space(.),'Filter')] | "
+            "//a[contains(normalize-space(.),'Filtrar') or contains(normalize-space(.),'Filter')]",
         ):
             try:
                 if not el.is_displayed():
                     continue
-                # ignora se estiver dentro de popup de data
                 parent_txt = ""
                 try:
-                    parent_txt = el.find_element(By.XPATH, "./ancestor::*[contains(@class,'modal') or contains(@class,'popup') or contains(@class,'dropdown')][1]").text
+                    parent_txt = el.find_element(
+                        By.XPATH,
+                        "./ancestor::*[contains(@class,'modal') or contains(@class,'popup') or contains(@class,'dropdown')][1]",
+                    ).text
                 except Exception:
                     parent_txt = ""
-                if "Filtro Data" in parent_txt or "Início" in parent_txt:
+                if "Filtro Data" in parent_txt or "Início" in parent_txt or "Date Filter" in parent_txt:
                     continue
                 btn = el
-                # se tiver classe laranja / primary, melhor ainda
                 cls = el.get_attribute("class") or ""
-                if "orange" in cls.lower() or "primary" in cls.lower() or "filtrar" in cls.lower():
+                if "orange" in cls.lower() or "primary" in cls.lower() or "filtrar" in cls.lower() or "filter" in cls.lower():
                     break
             except Exception:
                 continue
         if not btn:
             btn = self._find_first(
                 [
-                    (By.XPATH, "//button[contains(., 'Filtrar')]"),
-                    (By.XPATH, "//a[contains(., 'Filtrar')]"),
+                    (By.XPATH, "//button[contains(., 'Filtrar') or contains(., 'Filter')]"),
+                    (By.XPATH, "//a[contains(., 'Filtrar') or contains(., 'Filter')]"),
                 ],
                 timeout=10,
             )
