@@ -417,19 +417,49 @@ async def calibrar(request: Request):
                         "calibragem_lista",
                         f"Lista com {n} veículo(s) — lupa só se estiver vazia",
                     )
-                    # tenta marcar PCE7B03 e Select (próximo passo da calibração)
+                    bot.select_vehicle_by_plate("PCE7B03")
+                    bot._trace(
+                        "calibragem_select",
+                        "Select PCE7B03 OK",
+                    )
+                    # Filter + nuvem de download (próximo passo crítico)
+                    bot.click_filtrar()
+                    bot._trace("calibragem_filter", "Clicou Filter")
+                    bot._sleep(2)
+                    before = {p.name for p in tmp.glob("*.pdf")}
+                    # reutiliza lógica de download
+                    from pathlib import Path as P
+
                     try:
-                        bot.select_vehicle_by_plate("PCE7B03")
-                        bot._trace(
-                            "calibragem_ok",
-                            "Select PCE7B03 OK — calibração avançada",
-                        )
+                        # clica nuvem (mesmo código do download_historico_pdf)
+                        bot._click_download_cloud()
+                        bot._trace("calibragem_download_click", "Clicou na nuvem de download")
+                        end = __import__("time").time() + 60
+                        pdf = None
+                        while __import__("time").time() < end:
+                            partial = list(tmp.glob("*.crdownload")) + list(tmp.glob("*.tmp"))
+                            if partial:
+                                __import__("time").sleep(0.5)
+                                continue
+                            news = [p for p in tmp.glob("*.pdf") if p.name not in before]
+                            if news:
+                                pdf = max(news, key=lambda p: p.stat().st_mtime)
+                                if pdf.stat().st_size > 1000:
+                                    break
+                            __import__("time").sleep(0.4)
+                        if pdf and pdf.exists():
+                            bot._trace(
+                                "calibragem_ok",
+                                f"PDF baixado: {pdf.name} ({pdf.stat().st_size} bytes)",
+                            )
+                        else:
+                            bot._trace(
+                                "calibragem_download_timeout",
+                                "Clicou na nuvem mas o PDF não chegou na pasta temp",
+                                ok=False,
+                            )
                     except Exception as e:
-                        bot._trace(
-                            "calibragem_select_falhou",
-                            str(e),
-                            ok=False,
-                        )
+                        bot._trace("calibragem_download_falhou", str(e), ok=False)
                         raise
             debug_session.finish_run(ok=True)
         except Exception as e:

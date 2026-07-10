@@ -1609,6 +1609,121 @@ class SitraxBot:
         self.click_filtrar()
         self._sleep(2)
 
+    def _click_download_cloud(self) -> None:
+        """
+        Clica no ícone de nuvem roxa ao lado do botão Filter/Filtrar.
+        (visto na calibração: Filter laranja + nuvem download)
+        """
+        d = self._d()
+        self._sleep(0.5)
+        clicked = False
+        try:
+            res = d.execute_script(
+                """
+                function visible(el) {
+                  var r = el.getBoundingClientRect();
+                  return r.width > 2 && r.height > 2;
+                }
+                // 1) ícones font-awesome de nuvem / download
+                var sels = [
+                  'i.fa-cloud-arrow-down', 'i.fa-cloud-download', 'i.fa-cloud-download-alt',
+                  'i.fa-cloud', 'i.fa-download',
+                  'i[class*="cloud"]', 'i[class*="download"]',
+                  'svg[class*="cloud"]',
+                  '[onclick*="export"]', '[onclick*="Export"]',
+                  '[onclick*="download"]', '[onclick*="Download"]',
+                  '[title*="Download"]', '[title*="Export"]', '[aria-label*="Download"]'
+                ];
+                for (var s = 0; s < sels.length; s++) {
+                  var nodes = document.querySelectorAll(sels[s]);
+                  for (var i = 0; i < nodes.length; i++) {
+                    var el = nodes[i];
+                    if (el.closest && el.closest('#sidebar-menu')) continue;
+                    if (!visible(el)) continue;
+                    // prefere o que está perto do botão Filter
+                    el.scrollIntoView({block:'center'});
+                    el.click();
+                    return 'sel:' + sels[s];
+                  }
+                }
+                // 2) irmão / vizinho do botão Filter (laranja)
+                var filters = document.querySelectorAll('button,a');
+                for (var f = 0; f < filters.length; f++) {
+                  var t = (filters[f].innerText || filters[f].textContent || '').trim();
+                  if (t !== 'Filter' && t !== 'Filtrar' && t.indexOf('Filter') < 0 && t.indexOf('Filtrar') < 0) continue;
+                  var parent = filters[f].parentElement;
+                  if (!parent) continue;
+                  var kids = parent.querySelectorAll('i,button,a,span,div,svg');
+                  for (var k = 0; k < kids.length; k++) {
+                    var c = kids[k];
+                    if (c === filters[f]) continue;
+                    var cls = (c.className || '') + '';
+                    var oc = c.getAttribute('onclick') || '';
+                    if (/cloud|download|export/i.test(cls + ' ' + oc) || visible(c) && c !== filters[f]) {
+                      // clica no que parece ícone ao lado
+                      if (/cloud|download|export/i.test(cls + ' ' + oc)) {
+                        c.click();
+                        return 'near-filter';
+                      }
+                    }
+                  }
+                  // próximo irmão
+                  var sib = filters[f].nextElementSibling;
+                  if (sib) { sib.click(); return 'filter-next-sibling'; }
+                }
+                // 3) qualquer elemento roxo/clickável com cloud no class
+                var all = document.querySelectorAll('i,button,a,span,div');
+                for (var j = 0; j < all.length; j++) {
+                  var e = all[j];
+                  if (e.closest && e.closest('#sidebar-menu')) continue;
+                  if (!visible(e)) continue;
+                  var cc = (e.className || '') + ' ' + (e.getAttribute('onclick') || '');
+                  if (/fa-cloud|cloud-arrow|cloud-download|exportPdf|export.*pdf|download.*pdf/i.test(cc)) {
+                    e.click();
+                    return 'heuristic-cloud';
+                  }
+                }
+                return null;
+                """
+            )
+            if res:
+                clicked = True
+                logger.info("Download cloud click: %s", res)
+                self._trace("download_cloud", f"Clicou nuvem: {res}")
+        except Exception as e:
+            logger.warning("JS download cloud: %s", e)
+
+        if not clicked:
+            for sel in [
+                (By.CSS_SELECTOR, "i.fa-cloud-arrow-down, i.fa-cloud-download-alt, i.fa-cloud, i[class*='cloud']"),
+                (By.CSS_SELECTOR, "[onclick*='export'], [onclick*='Export'], [onclick*='download']"),
+            ]:
+                try:
+                    for el in d.find_elements(*sel):
+                        try:
+                            d.execute_script("arguments[0].click();", el)
+                            clicked = True
+                            self._trace("download_cloud", f"Fallback {sel}")
+                            break
+                        except Exception:
+                            continue
+                except Exception:
+                    continue
+                if clicked:
+                    break
+
+        if not clicked:
+            self._save_debug(
+                "download_nao_encontrado",
+                "Ícone de nuvem (download) não encontrado ao lado do Filter",
+                ok=False,
+            )
+            raise TimeoutException(
+                "Não achei o botão de download (nuvem) do histórico. "
+                "Abra /debug."
+            )
+        self._sleep(1)
+
     def download_historico_pdf(
         self,
         placa: str,
@@ -1631,75 +1746,7 @@ class SitraxBot:
         before = {p.name for p in dest.glob("*.pdf")}
         self._prepare_historico_filtrado(placa, data_ini, data_fim)
 
-        # botão download (nuvem roxa ao lado de Filtrar) — via JS no headless
-        clicked = False
-        try:
-            res = self._d().execute_script(
-                """
-                // ícones de nuvem / download
-                var sels = [
-                  'i.fa-cloud-arrow-down', 'i.fa-cloud-download', 'i.fa-cloud-download-alt',
-                  'i.fa-download', 'i[class*="cloud"]', 'i[class*="download"]',
-                  '[onclick*="export"]', '[onclick*="Export"]', '[onclick*="download"]',
-                  '[onclick*="Download"]', '[title*="Download"]', '[title*="export"]'
-                ];
-                for (var s = 0; s < sels.length; s++) {
-                  var nodes = document.querySelectorAll(sels[s]);
-                  for (var i = 0; i < nodes.length; i++) {
-                    var el = nodes[i];
-                    if (el.closest && el.closest('#sidebar-menu')) continue;
-                    var r = el.getBoundingClientRect();
-                    if (r.width < 1 && r.height < 1) continue;
-                    el.scrollIntoView({block:'center'});
-                    el.click();
-                    return sels[s];
-                  }
-                }
-                // botão/link roxo ao lado de Filtrar
-                var all = document.querySelectorAll('button,a,div,span,i');
-                for (var j = 0; j < all.length; j++) {
-                  var e = all[j];
-                  var cls = (e.className || '') + '';
-                  var oc = e.getAttribute('onclick') || '';
-                  if (/cloud|download|export/i.test(cls + ' ' + oc)) {
-                    if (e.closest && e.closest('#sidebar-menu')) continue;
-                    e.click();
-                    return 'heuristic';
-                  }
-                }
-                return null;
-                """
-            )
-            if res:
-                clicked = True
-                logger.info("Clicou download via JS: %s", res)
-        except Exception as e:
-            logger.warning("JS download: %s", e)
-
-        if not clicked:
-            for sel in [
-                (By.CSS_SELECTOR, "i.fa-cloud-arrow-down, i.fa-cloud-download-alt, i.fa-download, i[class*='cloud']"),
-                (By.CSS_SELECTOR, "[onclick*='export'], [onclick*='Export'], [onclick*='download']"),
-            ]:
-                try:
-                    for el in self._d().find_elements(*sel):
-                        try:
-                            self._d().execute_script("arguments[0].click();", el)
-                            clicked = True
-                            break
-                        except Exception:
-                            continue
-                except Exception:
-                    continue
-                if clicked:
-                    break
-
-        if not clicked:
-            self._save_debug("download_nao_encontrado")
-            raise TimeoutException(
-                "Não achei o botão de download (nuvem) do histórico. "
-                f"Veja {DEBUG_DIR}"
-            )
+        self._click_download_cloud()
 
         # espera PDF aparecer na pasta temp
         end = time.time() + timeout
