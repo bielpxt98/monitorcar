@@ -1971,8 +1971,9 @@ class SitraxBot:
 
     def _try_open_date_via_jsf(self) -> bool:
         """
-        Abre filtro de data via API JSF/PrimeFaces da página
-        (mesmo estilo de hideModalSearchVeiculo / selectVeiculoSearch).
+        Abre filtro de data via API Sitrax (debug mostrou):
+          swClassToggle('hidden', 'idFiltroDataIni');
+          swClassToggle('hidden', 'idFiltro');
         """
         d = self._d()
         hooks = self._discover_date_filter_hooks()
@@ -1986,26 +1987,57 @@ class SitraxBot:
         except Exception:
             pass
 
+        # 0) API real Sitrax (descoberta no debug)
+        try:
+            opened = d.execute_script(
+                """
+                var steps = [];
+                try {
+                  if (typeof swClassToggle === 'function') {
+                    swClassToggle('hidden', 'idFiltroDataIni');
+                    steps.push('swClassToggle idFiltroDataIni');
+                  }
+                } catch(e) { steps.push('err1:'+e); }
+                try {
+                  if (typeof swClassToggle === 'function') {
+                    // garante painel filtro visível
+                    var el = document.getElementById('idFiltroDataIni');
+                    if (el) {
+                      el.classList.remove('hidden');
+                      el.style.display = '';
+                      el.style.visibility = 'visible';
+                      steps.push('unhide idFiltroDataIni');
+                    }
+                  }
+                } catch(e) { steps.push('err2:'+e); }
+                return steps;
+                """
+            )
+            logger.info("Sitrax open date: %s", opened)
+            self._sleep(0.5)
+            if self._popup_filtro_data_open():
+                return True
+        except Exception as e:
+            logger.warning("swClassToggle open: %s", e)
+
         # 1) chamar funções candidatas
         fns = list(hooks.get("fns") or [])
-        # nomes comuns em apps Sitrax/JSF
         for name in [
+            "swClassToggle",
             "showFiltroData",
             "openFiltroData",
             "exibirFiltroData",
             "abrirFiltroData",
             "showDateFilter",
             "openDateFilter",
-            "showFilterDate",
             "filtroData",
-            "FiltroData",
-            "showModalFiltroData",
-            "openModalFiltroData",
         ]:
             if name not in fns:
                 fns.append(name)
 
         for name in fns:
+            if name == "swClassToggle":
+                continue
             try:
                 called = d.execute_script(
                     """
@@ -2442,29 +2474,45 @@ class SitraxBot:
             res = d.execute_script(
                 """
                 function norm(s){ return (s||'').replace(/\\s+/g,' ').trim(); }
-                var body = norm(document.body.innerText);
-                // procura no popup
-                var blocks = document.querySelectorAll('div,section,form');
-                var text = '';
-                for (var i=0;i<blocks.length;i++){
-                  var t = norm(blocks[i].innerText||'');
-                  if (t.length < 20 || t.length > 350) continue;
-                  if (/Filter\\s*Date|Filtro\\s*Data|Date\\s*Filter/i.test(t)
-                      && /(Home|In[ií]cio|Start|From)/i.test(t)
-                      && /(End|Fim)/i.test(t)) {
-                    text = t; break;
+                var ini = null, fim = null;
+                // 1) painel idFiltroDataIni (Sitrax real)
+                var box = document.getElementById('idFiltroDataIni');
+                var text = box ? norm(box.innerText||box.textContent||'') : '';
+                if (!text || text.length < 10){
+                  var blocks = document.querySelectorAll('div,section,form,span');
+                  for (var i=0;i<blocks.length;i++){
+                    var t = norm(blocks[i].innerText||'');
+                    if (t.length < 15 || t.length > 400) continue;
+                    if (/Filter\\s*Date|Filtro\\s*Data|Date\\s*Filter/i.test(t)
+                        && /(Home|In[ií]cio|Start|From)/i.test(t)
+                        && /(End|Fim)/i.test(t)) {
+                      text = t; break;
+                    }
                   }
                 }
-                if (!text) text = body;
-                var ini = null, fim = null;
-                var m1 = text.match(/(?:Home|In[ií]cio|Start|From)\\s*:\\s*(\\d{2}\\/\\d{2}\\/\\d{4})/i);
-                var m2 = text.match(/(?:End|Fim)\\s*:\\s*(\\d{2}\\/\\d{2}\\/\\d{4})/i);
+                if (!text) text = norm(document.body.innerText).slice(0, 2500);
+                var m1 = text.match(/(?:Home|In[ií]cio|Start|From)\\s*:?\\s*(\\d{2}\\/\\d{2}\\/\\d{4})/i);
+                var m2 = text.match(/(?:End|Fim)\\s*:?\\s*(\\d{2}\\/\\d{2}\\/\\d{4})/i);
                 if (m1) ini = m1[1];
                 if (m2) fim = m2[1];
-                return {ini: ini, fim: fim, sample: text.slice(0,120)};
+                // 2) duas datas roxas no popup se regex falhar
+                if (!ini || !fim){
+                  var dates = [];
+                  var nodes = (box || document).querySelectorAll('span,div,b,em,a,input');
+                  for (var i=0;i<nodes.length;i++){
+                    var t = norm(nodes[i].innerText||nodes[i].value||'');
+                    var m = t.match(/(\\d{2}\\/\\d{2}\\/\\d{4})/);
+                    if (m && dates.indexOf(m[1]) < 0) dates.push(m[1]);
+                  }
+                  if (!ini && dates[0]) ini = dates[0];
+                  if (!fim && dates[1]) fim = dates[1];
+                  else if (!fim && dates[0]) fim = dates[0];
+                }
+                return {ini: ini, fim: fim, sample: (text||'').slice(0,140)};
                 """
             )
             if res:
+                logger.info("popup Home/End parse: %s", res)
                 return res.get("ini"), res.get("fim")
         except Exception as e:
             logger.warning("popup home/end: %s", e)
@@ -2691,282 +2739,295 @@ class SitraxBot:
         except Exception:
             return False
 
-    def _select_range_on_calendar(self, data_ini: date, data_fim: date) -> bool:
+    def _lightpick_find_day(
+        self, day: int, left_panel_only: bool = True
+    ) -> Optional[dict]:
         """
-        Clica dias no Lightpick (classe lightpick__day).
-
-        Mesmo mês: 10 e 11 no painel ESQUERDO (não no calendário de lado).
+        Acha um .lightpick__day no painel esquerdo (1º mês) ou direito.
+        Retorna {x,y,cls} ou None. NÃO clica.
         """
         d = self._d()
-        same_month = (
-            data_ini.month == data_fim.month and data_ini.year == data_fim.year
-        )
-        logger.info(
-            "Selecionar calendário Lightpick: %s → %s (mesmo_mes=%s)",
-            data_ini,
-            data_fim,
-            same_month,
-        )
-
-        # Estratégia principal: .lightpick__day (confirmado no debug)
         try:
-            result = d.execute_script(
+            return d.execute_script(
                 """
-                var day1 = arguments[0], day2 = arguments[1], sameMonth = arguments[2];
+                var dayWant = arguments[0], leftOnly = arguments[1];
                 function visible(el){
                   var r = el.getBoundingClientRect();
-                  return r.width > 8 && r.height > 8 && r.top > 0 && r.bottom < innerHeight + 40;
+                  return r.width > 8 && r.height > 8 && r.top > 0;
                 }
-                function dayNum(el){
-                  var t = (el.innerText || el.textContent || '').replace(/\\s+/g,'').trim();
-                  return t;
-                }
-                // Lightpick: não usar dias de mês vizinho
-                var days = Array.prototype.slice.call(
-                  document.querySelectorAll(
-                    '.lightpick__day.is-available, .lightpick__day:not(.is-disabled)'
-                  )
-                );
-                if (!days.length){
-                  days = Array.prototype.slice.call(
-                    document.querySelectorAll('.lightpick__day, [class*="lightpick"] [class*="day"]')
-                  );
-                }
-                // bounds do calendário lightpick
-                var root = document.querySelector('.lightpick, .lightpick__container, [class*="lightpick"]');
-                var rootR = root ? root.getBoundingClientRect() : null;
-                if (!rootR || rootR.width < 100){
-                  // fallback: bounding de todos os days
-                  var minL=1e9, maxR=0, minT=1e9, maxB=0;
-                  days.forEach(function(el){
-                    if (!visible(el)) return;
-                    var r = el.getBoundingClientRect();
+                var days = document.querySelectorAll('.lightpick__day');
+                if (!days.length) return null;
+                // meio do calendário lightpick
+                var root = document.querySelector('.lightpick');
+                var midX = null;
+                if (root){
+                  var rr = root.getBoundingClientRect();
+                  midX = rr.left + rr.width * 0.48;
+                } else {
+                  var minL=1e9, maxR=0;
+                  for (var i=0;i<days.length;i++){
+                    if (!visible(days[i])) continue;
+                    var r = days[i].getBoundingClientRect();
                     if (r.left < minL) minL = r.left;
                     if (r.right > maxR) maxR = r.right;
-                    if (r.top < minT) minT = r.top;
-                    if (r.bottom > maxB) maxB = r.bottom;
-                  });
-                  if (maxR > minL) rootR = {left:minL, right:maxR, top:minT, bottom:maxB, width:maxR-minL};
-                }
-                if (!rootR) return {ok:false, reason:'no_lightpick', nDays: days.length};
-
-                var midX = rootR.left + (rootR.width || (rootR.right-rootR.left)) * 0.48;
-
-                function pick(dayNumWant, leftPanel){
-                  var best = null, bestScore = 1e9;
-                  for (var i=0;i<days.length;i++){
-                    var el = days[i];
-                    if (!visible(el)) continue;
-                    var cls = (el.className && el.className.toString) ? el.className.toString() : '';
-                    // ignora meses vizinhos (cinza)
-                    if (/is-previous-month|is-next-month|is-disabled/.test(cls)) continue;
-                    if (dayNum(el) !== String(dayNumWant)) continue;
-                    var r = el.getBoundingClientRect();
-                    if (leftPanel && r.left >= midX - 4) continue; // só esquerdo
-                    if (!leftPanel && !sameMonth && r.left < midX + 4) continue; // só direito
-                    // score: preferir painel esquerdo (menor left) no mesmo mês
-                    var score = r.left + r.top * 0.01;
-                    if (score < bestScore){
-                      bestScore = score;
-                      best = {
-                        el: el,
-                        x: r.left + r.width/2,
-                        y: r.top + r.height/2,
-                        left: r.left,
-                        cls: cls.slice(0,80)
-                      };
-                    }
                   }
-                  return best;
+                  if (maxR > minL) midX = minL + (maxR-minL)*0.48;
                 }
-
-                var p1 = pick(day1, true);
-                var p2 = pick(day2, sameMonth ? true : false);
-                if (!p2 && sameMonth) p2 = pick(day2, true);
-                if (!p1) return {ok:false, reason:'no_day1', midX:midX, nDays:days.length};
-                if (!p2) return {ok:false, reason:'no_day2', midX:midX, p1:p1, nDays:days.length};
-
-                // clique nativo no elemento Lightpick (melhor que só CDP)
-                function tap(info){
-                  try { info.el.scrollIntoView({block:'center'}); } catch(e){}
-                  try { info.el.click(); } catch(e){}
-                  try {
-                    var o = {bubbles:true,cancelable:true,view:window,
-                      clientX:info.x, clientY:info.y, button:0};
-                    info.el.dispatchEvent(new MouseEvent('mousedown', o));
-                    info.el.dispatchEvent(new MouseEvent('mouseup', o));
-                    info.el.dispatchEvent(new MouseEvent('click', o));
-                  } catch(e){}
+                var best = null, bestScore = 1e9;
+                for (var i=0;i<days.length;i++){
+                  var el = days[i];
+                  if (!visible(el)) continue;
+                  var cls = (el.className && el.className.toString) ? el.className.toString() : '';
+                  if (/is-previous-month|is-next-month|is-disabled/.test(cls)) continue;
+                  var t = (el.innerText||'').replace(/\\s+/g,'').trim();
+                  if (t !== String(dayWant)) continue;
+                  var r = el.getBoundingClientRect();
+                  if (midX != null){
+                    if (leftOnly && r.left >= midX - 2) continue;
+                    if (!leftOnly && r.left < midX + 2) continue;
+                  }
+                  var score = r.left + r.top * 0.01;
+                  if (score < bestScore){
+                    bestScore = score;
+                    best = {
+                      x: r.left + r.width/2,
+                      y: r.top + r.height/2,
+                      cls: cls,
+                      left: r.left
+                    };
+                  }
                 }
-                tap(p1);
-                return {
-                  ok: true,
-                  needSecond: true,
-                  p1: {x:p1.x, y:p1.y, left:p1.left, cls:p1.cls},
-                  p2: {x:p2.x, y:p2.y, left:p2.left, cls:p2.cls},
-                  midX: midX,
-                  nDays: days.length
-                };
+                return best;
                 """,
-                data_ini.day,
-                data_fim.day,
-                same_month,
+                int(day),
+                bool(left_panel_only),
             )
-            logger.info("Lightpick pick: %s", result)
-            try:
-                self._trace(
-                    "data_dias_achados",
-                    f"lightpick={result}",
-                    shot=True,
-                )
-            except Exception:
-                pass
+        except Exception as e:
+            logger.warning("lightpick find day %s: %s", day, e)
+            return None
 
-            if result and result.get("ok"):
-                p1, p2 = result.get("p1") or {}, result.get("p2") or {}
-                # 1º dia
-                if p1.get("x"):
-                    self._cdp_click_xy(p1["x"], p1["y"])
-                self._sleep(0.4)
-                # 2º dia (mesmo painel se same month)
+    def _lightpick_day_is_orange(self, day: int, left_panel_only: bool = True) -> bool:
+        """True se o dia está laranja (selecionado: is-start-date / is-end-date / is-in-range)."""
+        d = self._d()
+        try:
+            return bool(
                 d.execute_script(
                     """
-                    var day2 = arguments[0], sameMonth = arguments[1], midX = arguments[2];
-                    var days = document.querySelectorAll(
-                      '.lightpick__day.is-available, .lightpick__day:not(.is-disabled)'
-                    );
-                    if (!days.length) days = document.querySelectorAll('.lightpick__day');
+                    var dayWant = arguments[0], leftOnly = arguments[1];
+                    var days = document.querySelectorAll('.lightpick__day');
+                    var root = document.querySelector('.lightpick');
+                    var midX = null;
+                    if (root){
+                      var rr = root.getBoundingClientRect();
+                      midX = rr.left + rr.width * 0.48;
+                    }
                     for (var i=0;i<days.length;i++){
                       var el = days[i];
-                      var cls = (el.className&&el.className.toString)||'';
+                      var cls = (el.className && el.className.toString) ? el.className.toString() : '';
                       if (/is-previous-month|is-next-month|is-disabled/.test(cls)) continue;
                       var t = (el.innerText||'').replace(/\\s+/g,'').trim();
-                      if (t !== String(day2)) continue;
+                      if (t !== String(dayWant)) continue;
                       var r = el.getBoundingClientRect();
-                      if (sameMonth && midX && r.left >= midX - 4) continue;
-                      el.click();
-                      try {
-                        var o = {bubbles:true,cancelable:true,view:window,
-                          clientX:r.left+r.width/2, clientY:r.top+r.height/2, button:0};
-                        el.dispatchEvent(new MouseEvent('mousedown', o));
-                        el.dispatchEvent(new MouseEvent('mouseup', o));
-                        el.dispatchEvent(new MouseEvent('click', o));
-                      } catch(e){}
-                      return true;
+                      if (midX != null && leftOnly && r.left >= midX - 2) continue;
+                      // laranja = selecionado no Lightpick
+                      if (/is-start-date|is-end-date|is-in-range|is-selected/.test(cls))
+                        return true;
                     }
                     return false;
                     """,
-                    data_fim.day,
-                    same_month,
-                    result.get("midX"),
+                    int(day),
+                    bool(left_panel_only),
                 )
-                if p2.get("x"):
-                    self._cdp_click_xy(p2["x"], p2["y"])
-                self._sleep(0.35)
-                logger.info(
-                    "Lightpick clicou %s → %s",
-                    data_ini.day,
-                    data_fim.day,
-                )
-                return True
-        except Exception as e:
-            logger.warning("lightpick select: %s", e)
-
-        # Fallback: geometria genérica + selenium
-        try:
-            return self._select_range_selenium_days(data_ini, data_fim)
-        except Exception as e:
-            logger.warning("select range selenium: %s", e)
+            )
+        except Exception:
             return False
 
+    def _lightpick_click_day_once(
+        self, day: int, left_panel_only: bool = True
+    ) -> bool:
+        """UM único clique no dia (não repete)."""
+        d = self._d()
+        info = self._lightpick_find_day(day, left_panel_only)
+        if not info:
+            logger.warning("Lightpick: dia %s não achado (left=%s)", day, left_panel_only)
+            return False
+        # só UM click via JS no elemento — sem CDP extra (evita 2x no mesmo dia)
+        try:
+            ok = d.execute_script(
+                """
+                var dayWant = arguments[0], leftOnly = arguments[1], midHint = arguments[2];
+                var days = document.querySelectorAll('.lightpick__day');
+                var root = document.querySelector('.lightpick');
+                var midX = root ? root.getBoundingClientRect().left + root.getBoundingClientRect().width*0.48 : midHint;
+                for (var i=0;i<days.length;i++){
+                  var el = days[i];
+                  var cls = (el.className&&el.className.toString)||'';
+                  if (/is-previous-month|is-next-month|is-disabled/.test(cls)) continue;
+                  var t = (el.innerText||'').replace(/\\s+/g,'').trim();
+                  if (t !== String(dayWant)) continue;
+                  var r = el.getBoundingClientRect();
+                  if (leftOnly && midX && r.left >= midX - 2) continue;
+                  if (!leftOnly && midX && r.left < midX + 2) continue;
+                  el.click();  // UM clique só
+                  return {ok:true, cls: cls.slice(0,80), x:r.left+r.width/2, y:r.top+r.height/2};
+                }
+                return {ok:false};
+                """,
+                int(day),
+                bool(left_panel_only),
+                info.get("left"),
+            )
+            logger.info("Lightpick UM clique no dia %s: %s", day, ok)
+            return bool(ok and ok.get("ok"))
+        except Exception as e:
+            logger.warning("lightpick click day %s: %s", day, e)
+            # fallback CDP uma vez
+            if info.get("x") and info.get("y"):
+                return self._cdp_click_xy(info["x"], info["y"])
+            return False
+
+    def _select_range_on_calendar(self, data_ini: date, data_fim: date) -> bool:
+        """
+        Lightpick — fluxo correto (como o usuário ensinou):
+          1) UM clique no 1º dia (ex.: 10)
+          2) espera ficar LARANJA (is-start-date)
+          3) UM clique no 2º dia (ex.: 11) no MESMO calendário se for o mesmo mês
+        """
+        d = self._d()
+        same_month = (
+            data_ini.month == data_fim.month and data_ini.year == data_fim.year
+        )
+        day1, day2 = data_ini.day, data_fim.day
+        logger.info(
+            "Calendário: 1 clique no %s, espera laranja, 1 clique no %s (mesmo_mes=%s)",
+            day1,
+            day2,
+            same_month,
+        )
+
+        # 1) UM clique no primeiro dia (painel esquerdo)
+        if not self._lightpick_click_day_once(day1, left_panel_only=True):
+            logger.warning("Falhou clique no dia %s", day1)
+            try:
+                return self._select_range_selenium_days(data_ini, data_fim)
+            except Exception:
+                return False
+
+        # 2) espera ficar laranja (selecionado)
+        orange = False
+        for i in range(12):
+            self._sleep(0.2)
+            if self._lightpick_day_is_orange(day1, left_panel_only=True):
+                orange = True
+                logger.info("Dia %s ficou laranja (tentativa %s)", day1, i + 1)
+                break
+        if not orange:
+            # ainda assim tenta o 2º dia — às vezes a classe demora
+            logger.warning(
+                "Dia %s não mostrou is-start-date a tempo; segue para o %s",
+                day1,
+                day2,
+            )
+            self._sleep(0.35)
+        else:
+            self._sleep(0.25)
+
+        try:
+            self._trace(
+                "data_dia1_laranja",
+                f"dia={day1} orange={orange} → próximo={day2}",
+                shot=True,
+            )
+        except Exception:
+            pass
+
+        # 3) UM clique no segundo dia (mesmo painel se mesmo mês)
+        if day1 == day2:
+            # mesmo dia: Lightpick às vezes precisa do 2º clique no mesmo
+            logger.info("Mesmo dia %s — não repete clique (já selecionado)", day1)
+            return True
+
+        left2 = same_month  # 11 também no calendário da esquerda
+        if not self._lightpick_click_day_once(day2, left_panel_only=left2):
+            logger.warning("Falhou clique no dia %s", day2)
+            return False
+
+        # espera o 2º ficar end-date / range
+        for i in range(10):
+            self._sleep(0.2)
+            if self._lightpick_day_is_orange(day2, left_panel_only=left2):
+                logger.info("Dia %s selecionado (laranja) tentativa %s", day2, i + 1)
+                break
+
+        try:
+            self._trace(
+                "data_dias_ok",
+                f"clicou {day1} (laranja={orange}) depois {day2}",
+                shot=True,
+            )
+        except Exception:
+            pass
+
+        # confere Home/End no popup se possível
+        self._sleep(0.3)
+        pop_ini, pop_fim = self._popup_home_end_dates()
+        logger.info(
+            "Após cliques calendário Home/End: %s → %s",
+            pop_ini,
+            pop_fim,
+        )
+        return True
+
     def _select_range_selenium_days(self, data_ini: date, data_fim: date) -> bool:
-        """Fallback: clica dias 10 e 11 só na metade esquerda (1º calendário)."""
+        """Fallback: 1 clique no dia1, espera, 1 clique no dia2 (esquerda)."""
         d = self._d()
         same_month = (
             data_ini.month == data_fim.month and data_ini.year == data_fim.year
         )
 
-        # bounds do calendário
-        try:
-            box = d.execute_script(
-                """
-                var divs = document.querySelectorAll('div');
-                for (var i=0;i<divs.length;i++){
-                  var r = divs[i].getBoundingClientRect();
-                  if (r.width < 280 || r.width > 900 || r.height < 150) continue;
-                  var t = (divs[i].innerText||'').toLowerCase();
-                  if ((/july|julho/.test(t) || /august|agosto/.test(t))
-                      && /\\b10\\b/.test(t) && /mon|tue|seg|ter/i.test(t))
-                    return {left:r.left, right:r.right, top:r.top, bottom:r.bottom,
-                            mid: r.left + r.width*0.48};
-                }
-                return null;
-                """
-            )
-        except Exception:
-            box = None
-        mid = (box or {}).get("mid") or 400
-
-        def find_day(day: int, left_only: bool):
-            best = None
-            best_x = 1e9
-            for el in d.find_elements(
-                By.XPATH,
-                f"//*[normalize-space()='{day}']",
-            ):
+        def find_day(day: int):
+            for el in d.find_elements(By.CSS_SELECTOR, ".lightpick__day"):
                 try:
                     if not el.is_displayed():
                         continue
-                    size = el.size
-                    if size.get("width", 99) > 56 or size.get("height", 99) > 56:
+                    cls = (el.get_attribute("class") or "")
+                    if "previous-month" in cls or "next-month" in cls:
                         continue
-                    if size.get("width", 0) < 14:
+                    if (el.text or "").strip() != str(day):
                         continue
-                    loc = el.location
-                    x = loc.get("x", 0) or 0
-                    if left_only and x >= mid:
-                        continue
-                    if not left_only and same_month and x >= mid:
-                        continue
-                    if x < best_x:
-                        best_x = x
-                        best = el
+                    return el
                 except Exception:
                     continue
-            return best
+            return None
 
-        el1 = find_day(data_ini.day, left_only=True)
-        el2 = find_day(
-            data_fim.day,
-            left_only=same_month,  # mesmo mês → só esquerda
-        )
+        el1 = find_day(data_ini.day)
         if not el1:
-            logger.warning("Selenium: dia %s não achado (esquerda)", data_ini.day)
-            self._save_debug("data_dia_ini_sumiu")
             return False
-        if not el2:
-            el2 = el1
-
+        # UM clique
         try:
-            ActionChains(d).move_to_element(el1).pause(0.1).click().perform()
-            self._sleep(0.35)
-            ActionChains(d).move_to_element(el2).pause(0.1).click().perform()
-            logger.info(
-                "Selenium clicou dia %s e %s (mesmo_mes=%s)",
-                data_ini.day,
-                data_fim.day,
-                same_month,
-            )
+            el1.click()
+        except Exception:
+            self._click(el1)
+        # espera laranja
+        for _ in range(10):
+            self._sleep(0.2)
+            if self._lightpick_day_is_orange(data_ini.day, True):
+                break
+        if data_ini.day == data_fim.day:
             return True
-        except Exception as e:
-            logger.warning("Selenium click dias: %s", e)
-            try:
-                self._click(el1)
-                self._sleep(0.3)
-                self._click(el2)
-                return True
-            except Exception:
-                return False
+        el2 = find_day(data_fim.day)
+        if not el2:
+            return False
+        try:
+            el2.click()
+        except Exception:
+            self._click(el2)
+        logger.info(
+            "Selenium: 1 clique %s, espera, 1 clique %s",
+            data_ini.day,
+            data_fim.day,
+        )
+        return True
 
     def set_date_filter(
         self,
