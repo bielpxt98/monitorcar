@@ -2271,6 +2271,195 @@ class SitraxBot:
                 placa, data_ini, data_fim, clear_previous=True
             )
 
+    def vehicle_chip_has_plate(self, placa: str) -> bool:
+        """True se a barra de filtros mostra o chip Veículo com essa placa."""
+        placa_u = self._norm_placa(placa)
+        if not placa_u:
+            return False
+        try:
+            return bool(
+                self._d().execute_script(
+                    """
+                    var alvo = (arguments[0] || '').toUpperCase().replace(/[^A-Z0-9]/g,'');
+                    if (!alvo) return false;
+                    var body = ((document.body && document.body.innerText) || '').toUpperCase();
+                    // chip "VEÍCULO: PDY4D85" / "VEHICLE: PDX3G64"
+                    if (body.indexOf(alvo) < 0) return false;
+                    var re = new RegExp(
+                      'VE[IÍ]CULO\\\\s*:\\\\s*' + alvo + '|' +
+                      'VEHICLE\\\\s*:\\\\s*' + alvo
+                    );
+                    if (re.test(body)) return true;
+                    // fallback: placa aparece perto da barra de filtros
+                    var nodes = document.querySelectorAll('div,span,button,a,label,li');
+                    for (var i = 0; i < nodes.length; i++) {
+                      var t = (nodes[i].innerText || nodes[i].textContent || '')
+                        .replace(/\\s+/g,' ').trim().toUpperCase();
+                      if (t.length > 60) continue;
+                      if (t.indexOf(alvo) >= 0 &&
+                          (t.indexOf('VEICULO') >= 0 || t.indexOf('VEÍCULO') >= 0 ||
+                           t.indexOf('VEHICLE') >= 0 || /^[A-Z]{3}/.test(t))) {
+                        return true;
+                      }
+                    }
+                    return false;
+                    """,
+                    placa_u,
+                )
+            )
+        except Exception:
+            return False
+
+    def wait_positions_grid(self, timeout: float = 30) -> int:
+        """
+        Espera a grade de posições (ou 'Mostrando: N Registro').
+        Retorna nº de linhas tbody encontradas (0 se vazio/timeout).
+        """
+        d = self._d()
+        end = time.time() + timeout
+        last_n = 0
+        while time.time() < end:
+            try:
+                n = d.execute_script(
+                    """
+                    var body = (document.body && document.body.innerText) || '';
+                    // "Mostrando: 104 Registro(s)" / "Showing: 104"
+                    var m = body.match(/Mostrando\\s*:\\s*(\\d+)/i)
+                         || body.match(/Showing\\s*:\\s*(\\d+)/i)
+                         || body.match(/(\\d+)\\s*Registro/i);
+                    if (m) return parseInt(m[1], 10);
+                    var tables = document.querySelectorAll('table');
+                    var best = 0;
+                    for (var i = 0; i < tables.length; i++) {
+                      var rows = tables[i].querySelectorAll('tbody tr');
+                      if (rows.length > best) best = rows.length;
+                    }
+                    return best;
+                    """
+                )
+                last_n = int(n or 0)
+                if last_n > 0:
+                    return last_n
+                # 0 registros explícito após filter
+                if re.search(
+                    r"mostrando\s*:\s*0|showing\s*:\s*0|0\s*registro",
+                    (d.find_element(By.TAG_NAME, "body").text or ""),
+                    re.I,
+                ):
+                    return 0
+            except Exception:
+                pass
+            self._sleep(0.45)
+        return last_n
+
+    def fetch_positions_for_fleet_plate(
+        self,
+        placa: str,
+        data_ini: Optional[date] = None,
+        data_fim: Optional[date] = None,
+        clear_previous: bool = False,
+    ) -> list:
+        """
+        Fluxo robusto 1 placa na frota:
+          limpa chip se preciso → escolhe placa → Filter → espera grade → scrape.
+        Até 3 tentativas se voltar 0 linhas (problema típico da frota).
+        """
+        from app.bot.report import positions_from_rows
+
+        placa_u = self._norm_placa(placa)
+        last_rows: list = []
+        for attempt in range(3):
+            try:
+                # tentativa 0: clear se pedido; tentativas seguintes sempre limpam
+                self.prepare_historico_warm(
+                    placa_u,
+                    data_ini,
+                    data_fim,
+                    clear_previous=(clear_previous or attempt > 0),
+                )
+            except Exception as e:
+                logger.warning(
+                    "prepare frota %s tentativa %s: %s", placa_u, attempt + 1, e
+                )
+                if attempt == 0:
+                    try:
+                        self.open_posicoes()
+                        self._sleep(1)
+                    except Exception:
+                        pass
+                continue
+
+            # modal fechado?
+            try:
+                self._d().execute_script(
+                    "if (typeof hideModalSearchVeiculo === 'function') "
+                    "hideModalSearchVeiculo();"
+                )
+            except Exception:
+                pass
+            self._sleep(0.4)
+
+            if not self.vehicle_chip_has_plate(placa_u):
+                logger.warning(
+                    "Chip Veículo sem %s após select (tentativa %s) — refaz",
+                    placa_u,
+                    attempt + 1,
+                )
+                self._trace(
+                    f"chip_sem_{placa_u}",
+                    f"Chip não mostrou {placa_u}",
+                    ok=False,
+                    shot=True,
+                )
+                self.clear_vehicle_chip()
+                continue
+
+            # garante Filter de novo (às vezes o 1º click some com modal)
+            try:
+                self.click_filtrar()
+            except Exception as e:
+                logger.warning("re-Filter %s: %s", placa_u, e)
+
+            n_hint = self.wait_positions_grid(timeout=28)
+            self.try_scroll_all()
+            rows = self.scrape_positions_table()
+            last_rows = rows or []
+            n_scrape = len(last_rows)
+            logger.info(
+                "Frota %s tentativa %s: grid~%s scrape=%s",
+                placa_u,
+                attempt + 1,
+                n_hint,
+                n_scrape,
+            )
+            if n_scrape > 0:
+                self._trace(
+                    f"frota_rows_{placa_u}",
+                    f"{n_scrape} linha(s) scrapadas (hint grid {n_hint})",
+                    ok=True,
+                )
+                return last_rows
+
+            # 0 linhas: tenta Filter + espera de novo
+            try:
+                self.click_filtrar()
+                self.wait_positions_grid(timeout=15)
+                self.try_scroll_all()
+                rows = self.scrape_positions_table()
+                last_rows = rows or []
+                if last_rows:
+                    return last_rows
+            except Exception:
+                pass
+
+            self._save_debug(
+                f"frota_zero_{placa_u}_t{attempt+1}",
+                f"0 posições para {placa_u} tentativa {attempt+1}",
+                ok=False,
+            )
+
+        return last_rows
+
     def return_to_vehicles_ready(self) -> None:
         """
         Após uma consulta: fecha popups e deixa o modal Veículos aberto

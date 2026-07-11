@@ -74,6 +74,10 @@ def _is_crash(err: BaseException) -> bool:
     )
 
 
+# Login serializado — Sitrax costuma derrubar sessão se 3 logins batem juntos
+_LOGIN_LOCK = threading.Lock()
+
+
 def _run_one_worker(
     worker_id: int,
     assigned: list[tuple[int, dict]],
@@ -85,6 +89,8 @@ def _run_one_worker(
     progress_lock: threading.Lock,
 ) -> list[PlateResult]:
     """Um Chrome permanente processa sua fatia round-robin."""
+    import time as _time
+
     from app.bot.sitrax import SitraxBot
     from app.bot.report import build_narrative_report, positions_from_rows
     from app.bot.summary_pdf import build_summary_pdf_bytes
@@ -120,9 +126,14 @@ def _run_one_worker(
             quiet=True,
             low_memory=True,
         )
-        b.start()
-        b.login()
+        # Escalonado + lock: evita 3 logins simultâneos invalidarem cookie
+        _time.sleep(worker_id * 4.0)
+        with _LOGIN_LOCK:
+            b.start()
+            b.login()
+            _time.sleep(1.5)
         b.open_posicoes()
+        b._sleep(1.0)
         debug_session.step(
             f"worker{worker_id+1}_pronto",
             f"Chrome {worker_id+1} logado em Posições — "
@@ -166,18 +177,36 @@ def _run_one_worker(
                         bot = _start()
 
                     assert bot is not None
-                    # 1ª placa: abre fluxo; seguintes: X do chip → outra placa
-                    bot.prepare_next_fleet_plate(
+                    # Fluxo robusto: chip + Filter + espera grade + scrape
+                    rows = bot.fetch_positions_for_fleet_plate(
                         pl,
                         data_ini=data_ini,
                         data_fim=data_fim,
-                        # 1ª placa deste Chrome (ou após relogin j==0)
-                        first=(j == 0),
+                        clear_previous=(j > 0),
                     )
-                    bot.try_scroll_all()
-                    rows = bot.scrape_positions_table()
                     positions = positions_from_rows(rows)
                     n_pts = len([p for p in positions if p.when])
+
+                    if n_pts == 0:
+                        # 2ª chance completa (reabre Posições)
+                        logger.warning(
+                            "Worker %s %s: 0 pts — reabre Posições e tenta de novo",
+                            worker_id + 1,
+                            pl,
+                        )
+                        try:
+                            bot.open_posicoes()
+                            bot._sleep(1)
+                        except Exception:
+                            pass
+                        rows = bot.fetch_positions_for_fleet_plate(
+                            pl,
+                            data_ini=data_ini,
+                            data_fim=data_fim,
+                            clear_previous=True,
+                        )
+                        positions = positions_from_rows(rows)
+                        n_pts = len([p for p in positions if p.when])
 
                     texto = build_narrative_report(
                         pl,
@@ -185,6 +214,14 @@ def _run_one_worker(
                         data_ref=data_ref,
                         cliente=v.get("cliente", ""),
                     )
+                    if n_pts == 0:
+                        texto = (
+                            f"📋 {pl}: 0 posições após Filter "
+                            f"(Chrome {worker_id+1}). "
+                            "Veículo pode não ter sido aplicado no filtro.\n\n"
+                            + texto
+                        )
+
                     pdf_b = build_summary_pdf_bytes(
                         pl,
                         positions,
@@ -199,13 +236,14 @@ def _run_one_worker(
                             pdf_bytes=pdf_b,
                             pontos=n_pts,
                             worker_id=worker_id,
-                            ok=True,
+                            ok=n_pts > 0,
+                            error="" if n_pts > 0 else "0 posições",
                         )
                     )
                     debug_session.step(
-                        f"w{worker_id+1}_ok_{pl}",
+                        f"w{worker_id+1}_ok_{pl}" if n_pts else f"w{worker_id+1}_zero_{pl}",
                         f"Chrome {worker_id+1}: {pl} → {n_pts} pts",
-                        ok=True,
+                        ok=n_pts > 0,
                         screenshot=False,
                     )
                     with progress_lock:
