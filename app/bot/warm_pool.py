@@ -292,13 +292,10 @@ class WarmPool:
                         n = bot._count_vehicle_items()
                         try:
                             plates = []
-                            if hasattr(bot, "list_vehicles"):
-                                plates = bot.list_vehicles() or []
-                            if not plates and hasattr(self, "list_plates_on_bot"):
-                                try:
-                                    plates = self.list_plates_on_bot(bot) or []
-                                except Exception:
-                                    plates = []
+                            if hasattr(bot, "list_plates"):
+                                plates = bot.list_plates() or []
+                            if not plates:
+                                plates = self.list_plates_on_bot(bot) or []
                             if plates:
                                 with self._lock:
                                     self._plates_cache = list(plates)
