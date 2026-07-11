@@ -2348,59 +2348,127 @@ class SitraxBot:
         return False
 
     def _click_popup_filtrar(self) -> bool:
-        """Clica Filtrar/Filter DENTRO do popup Filtro Data."""
+        """Clica Filtrar/Filter DENTRO do popup Filter Date (ao lado de Close)."""
         d = self._d()
         try:
             ok = d.execute_script(
                 """
                 function norm(s){ return (s||'').replace(/\\s+/g,' ').trim(); }
-                var nodes = document.querySelectorAll('button,a,input[type=button],input[type=submit],span');
-                var best = null;
+                // 1) botão laranja pequeno perto de Close/Fechar no Filter Date
+                var nodes = document.querySelectorAll('button,a,input[type=button],input[type=submit]');
+                var candidates = [];
                 for (var i=0;i<nodes.length;i++){
                   var el = nodes[i];
                   var t = norm(el.innerText || el.value || '');
                   if (t !== 'Filtrar' && t !== 'Filter') continue;
                   var r = el.getBoundingClientRect();
-                  if (r.width < 20 || r.height < 10) continue;
-                  // contexto: popup de data (não o Filter grande da barra)
+                  if (r.width < 30 || r.height < 18) continue;
+                  if (r.width > 200) continue; // barra principal é larga
                   var p = el, ctx = '';
-                  for (var k=0;k<7 && p;k++){
-                    ctx += ' ' + norm(p.innerText||'').slice(0,150);
+                  for (var k=0;k<8 && p;k++){
+                    ctx += ' ' + norm(p.innerText||'').slice(0,160);
                     p = p.parentElement;
                   }
-                  if (!/Filtro\\s*Data|Date\\s*Filter|Filter\\s*Date|In[ií]cio|Start\\s*:|Home\\s*:|End\\s*:/i.test(ctx)) continue;
-                  // botão pequeno do popup (barra tem botão maior com ícone)
-                  if (r.width > 220) continue;
-                  best = el;
-                  break;
+                  var inDatePop = /Filter\\s*Date|Date\\s*Filter|Filtro\\s*Data|Home\\s*:|End\\s*:|In[ií]cio|Close|Fechar/i.test(ctx);
+                  if (!inDatePop) continue;
+                  // preferir o que tem Close no mesmo contexto (popup)
+                  var score = r.top + ( /Close|Fechar/i.test(ctx) ? 0 : 50);
+                  candidates.push({el:el, score:score, t:t, w:r.width});
                 }
-                if (!best){
-                  // 2º: qualquer Filtrar perto de Home/End / Início/Fim
-                  for (var i=0;i<nodes.length;i++){
-                    var el = nodes[i];
-                    var t = norm(el.innerText || el.value || '');
-                    if (t !== 'Filtrar' && t !== 'Filter') continue;
-                    var p = el, ctx = '';
-                    for (var k=0;k<6 && p;k++){
-                      ctx += ' ' + norm(p.innerText||'').slice(0,120);
-                      p = p.parentElement;
-                    }
-                    if (/In[ií]cio|Home\\s*:|End\\s*:|Filtro\\s*Data|Date\\s*Filter|Filter\\s*Date/i.test(ctx)){
-                      best = el; break;
-                    }
-                  }
+                candidates.sort(function(a,b){ return a.score - b.score; });
+                if (candidates.length){
+                  var b = candidates[0].el;
+                  b.scrollIntoView({block:'center'});
+                  b.click();
+                  // reforço mouse
+                  try {
+                    var r = b.getBoundingClientRect();
+                    var o = {bubbles:true,cancelable:true,view:window,
+                      clientX:r.left+r.width/2, clientY:r.top+r.height/2, button:0};
+                    b.dispatchEvent(new MouseEvent('mousedown', o));
+                    b.dispatchEvent(new MouseEvent('mouseup', o));
+                    b.dispatchEvent(new MouseEvent('click', o));
+                  } catch(e){}
+                  return {ok:true, how:'popup_filter', n:candidates.length};
                 }
-                if (!best) return false;
-                best.click();
-                return true;
+                return {ok:false};
                 """
             )
-            if ok:
-                logger.info("Clicou Filtrar do popup de data")
+            if ok and ok.get("ok"):
+                logger.info("Clicou Filter do popup de data: %s", ok)
                 return True
+            logger.warning("Filter do popup não achado: %s", ok)
         except Exception as e:
             logger.warning("click popup filtrar: %s", e)
+
+        # Selenium: Filter ao lado de Close
+        try:
+            for el in d.find_elements(
+                By.XPATH,
+                "//button[normalize-space()='Filter' or normalize-space()='Filtrar']",
+            ):
+                if not el.is_displayed():
+                    continue
+                w = el.size.get("width", 0) or 0
+                if w > 200 or w < 30:
+                    continue
+                try:
+                    parent = el.find_element(By.XPATH, "./..")
+                    pt = (parent.text or "")[:120]
+                except Exception:
+                    pt = ""
+                if not any(
+                    x in pt
+                    for x in ("Close", "Fechar", "Home", "End", "Início", "Filter Date", "Filtro")
+                ):
+                    # ainda tenta se for botão laranja pequeno
+                    cls = (el.get_attribute("class") or "").lower()
+                    if "orange" not in cls and "primary" not in cls and "btn" not in cls:
+                        continue
+                try:
+                    ActionChains(d).move_to_element(el).pause(0.1).click().perform()
+                except Exception:
+                    self._click(el)
+                logger.info("Clicou Filter popup (selenium)")
+                return True
+        except Exception as e:
+            logger.warning("selenium popup filter: %s", e)
         return False
+
+    def _popup_home_end_dates(self) -> tuple[Optional[str], Optional[str]]:
+        """Lê Home/Início e End/Fim do popup Filter Date. Retorna (ini_br, fim_br)."""
+        d = self._d()
+        try:
+            res = d.execute_script(
+                """
+                function norm(s){ return (s||'').replace(/\\s+/g,' ').trim(); }
+                var body = norm(document.body.innerText);
+                // procura no popup
+                var blocks = document.querySelectorAll('div,section,form');
+                var text = '';
+                for (var i=0;i<blocks.length;i++){
+                  var t = norm(blocks[i].innerText||'');
+                  if (t.length < 20 || t.length > 350) continue;
+                  if (/Filter\\s*Date|Filtro\\s*Data|Date\\s*Filter/i.test(t)
+                      && /(Home|In[ií]cio|Start|From)/i.test(t)
+                      && /(End|Fim)/i.test(t)) {
+                    text = t; break;
+                  }
+                }
+                if (!text) text = body;
+                var ini = null, fim = null;
+                var m1 = text.match(/(?:Home|In[ií]cio|Start|From)\\s*:\\s*(\\d{2}\\/\\d{2}\\/\\d{4})/i);
+                var m2 = text.match(/(?:End|Fim)\\s*:\\s*(\\d{2}\\/\\d{2}\\/\\d{4})/i);
+                if (m1) ini = m1[1];
+                if (m2) fim = m2[1];
+                return {ini: ini, fim: fim, sample: text.slice(0,120)};
+                """
+            )
+            if res:
+                return res.get("ini"), res.get("fim")
+        except Exception as e:
+            logger.warning("popup home/end: %s", e)
+        return None, None
 
     def _click_popup_purple_date(self, which: str = "ini") -> bool:
         """
@@ -2625,201 +2693,186 @@ class SitraxBot:
 
     def _select_range_on_calendar(self, data_ini: date, data_fim: date) -> bool:
         """
-        Clica os dias no calendário duplo.
+        Clica dias no Lightpick (classe lightpick__day).
 
-        Mesmo mês (10 e 11 de julho):
-          - os DOIS cliques no painel da ESQUERDA (1º calendário)
-          - NÃO usa o calendário do lado (agosto)
-
-        Outro mês no fim: 1º no esquerdo, 2º no direito.
+        Mesmo mês: 10 e 11 no painel ESQUERDO (não no calendário de lado).
         """
         d = self._d()
         same_month = (
             data_ini.month == data_fim.month and data_ini.year == data_fim.year
         )
         logger.info(
-            "Selecionar calendário: %s → %s (mesmo_mes=%s)",
+            "Selecionar calendário Lightpick: %s → %s (mesmo_mes=%s)",
             data_ini,
             data_fim,
             same_month,
         )
 
-        # Estratégia A: achar células "10" e "11" por geometria (esquerda = 1º mês)
+        # Estratégia principal: .lightpick__day (confirmado no debug)
         try:
-            hits = d.execute_script(
+            result = d.execute_script(
                 """
                 var day1 = arguments[0], day2 = arguments[1], sameMonth = arguments[2];
                 function visible(el){
                   var r = el.getBoundingClientRect();
-                  return r.width > 2 && r.height > 2 && r.top > 0 && r.top < innerHeight;
+                  return r.width > 8 && r.height > 8 && r.top > 0 && r.bottom < innerHeight + 40;
                 }
-                // 1) achar o bloco do calendário (July + August / julho + agosto)
-                var root = null, rootR = null;
-                var divs = document.querySelectorAll('div');
-                for (var i=0;i<divs.length;i++){
-                  var el = divs[i];
-                  if (!visible(el)) continue;
-                  var r = el.getBoundingClientRect();
-                  if (r.width < 280 || r.width > 900 || r.height < 150 || r.height > 500) continue;
-                  var t = (el.innerText||'').toLowerCase();
-                  if (t.length > 800) continue;
-                  var hasJul = /\\bjulho\\b|\\bjuly\\b/.test(t);
-                  var hasAug = /\\bagosto\\b|\\baugust\\b/.test(t);
-                  var hasDays = /\\b10\\b/.test(t) && /\\b11\\b/.test(t);
-                  var hasWeek = /mon|tue|seg|ter|sun|dom/i.test(t);
-                  if ((hasJul || hasAug) && hasDays && hasWeek){
-                    if (!root || r.width < rootR.width){ root = el; rootR = r; }
-                  }
+                function dayNum(el){
+                  var t = (el.innerText || el.textContent || '').replace(/\\s+/g,'').trim();
+                  return t;
                 }
-                if (!root){
-                  // fallback: qualquer div larga com grade de dias
-                  for (var i=0;i<divs.length;i++){
-                    var el = divs[i];
-                    if (!visible(el)) continue;
+                // Lightpick: não usar dias de mês vizinho
+                var days = Array.prototype.slice.call(
+                  document.querySelectorAll(
+                    '.lightpick__day.is-available, .lightpick__day:not(.is-disabled)'
+                  )
+                );
+                if (!days.length){
+                  days = Array.prototype.slice.call(
+                    document.querySelectorAll('.lightpick__day, [class*="lightpick"] [class*="day"]')
+                  );
+                }
+                // bounds do calendário lightpick
+                var root = document.querySelector('.lightpick, .lightpick__container, [class*="lightpick"]');
+                var rootR = root ? root.getBoundingClientRect() : null;
+                if (!rootR || rootR.width < 100){
+                  // fallback: bounding de todos os days
+                  var minL=1e9, maxR=0, minT=1e9, maxB=0;
+                  days.forEach(function(el){
+                    if (!visible(el)) return;
                     var r = el.getBoundingClientRect();
-                    if (r.width < 300 || r.width > 800 || r.height < 160) continue;
-                    var t = (el.innerText||'');
-                    if ((t.match(/\\b\\d{1,2}\\b/g)||[]).length > 20){
-                      root = el; rootR = r; break;
+                    if (r.left < minL) minL = r.left;
+                    if (r.right > maxR) maxR = r.right;
+                    if (r.top < minT) minT = r.top;
+                    if (r.bottom > maxB) maxB = r.bottom;
+                  });
+                  if (maxR > minL) rootR = {left:minL, right:maxR, top:minT, bottom:maxB, width:maxR-minL};
+                }
+                if (!rootR) return {ok:false, reason:'no_lightpick', nDays: days.length};
+
+                var midX = rootR.left + (rootR.width || (rootR.right-rootR.left)) * 0.48;
+
+                function pick(dayNumWant, leftPanel){
+                  var best = null, bestScore = 1e9;
+                  for (var i=0;i<days.length;i++){
+                    var el = days[i];
+                    if (!visible(el)) continue;
+                    var cls = (el.className && el.className.toString) ? el.className.toString() : '';
+                    // ignora meses vizinhos (cinza)
+                    if (/is-previous-month|is-next-month|is-disabled/.test(cls)) continue;
+                    if (dayNum(el) !== String(dayNumWant)) continue;
+                    var r = el.getBoundingClientRect();
+                    if (leftPanel && r.left >= midX - 4) continue; // só esquerdo
+                    if (!leftPanel && !sameMonth && r.left < midX + 4) continue; // só direito
+                    // score: preferir painel esquerdo (menor left) no mesmo mês
+                    var score = r.left + r.top * 0.01;
+                    if (score < bestScore){
+                      bestScore = score;
+                      best = {
+                        el: el,
+                        x: r.left + r.width/2,
+                        y: r.top + r.height/2,
+                        left: r.left,
+                        cls: cls.slice(0,80)
+                      };
                     }
                   }
-                }
-                if (!root) return {ok:false, reason:'no_root'};
-
-                var midX = rootR.left + rootR.width * 0.48; // metade: esq=mês1, dir=mês2
-                // 2) todas as células com número do dia (tamanho de bolinha do calendário)
-                function findDays(dayNum, leftOnly){
-                  var out = [];
-                  var nodes = root.querySelectorAll('td, span, div, button, a');
-                  for (var i=0;i<nodes.length;i++){
-                    var el = nodes[i];
-                    if (!visible(el)) continue;
-                    if (el.tagName === 'TH') continue;
-                    // texto EXATO do dia (folha ou célula)
-                    var txt = (el.innerText || el.textContent || '').replace(/\\s+/g,'').trim();
-                    if (txt !== String(dayNum)) continue;
-                    var r = el.getBoundingClientRect();
-                    // bolinha do dia ~20-45px (não o mês inteiro)
-                    if (r.width < 16 || r.height < 16 || r.width > 56 || r.height > 56) continue;
-                    // dentro do root
-                    if (r.left < rootR.left - 4 || r.right > rootR.right + 4) continue;
-                    if (r.top < rootR.top + 20) continue; // evita header
-                    if (leftOnly && r.left >= midX) continue; // só 1º calendário
-                    if (!leftOnly && !sameMonth && r.left < midX) {
-                      // para outro mês, preferir direita — ainda coleta os dois
-                    }
-                    var cls = ((el.className && el.className.toString) ? el.className.toString() : '').toLowerCase();
-                    // NÃO pular 'available' / 'active' — só lixo claro
-                    if (/disabled|prev-month|next-month|outside/.test(cls) && !/available|active|selected|start|end/.test(cls))
-                      continue;
-                    out.push({
-                      x: r.left + r.width/2,
-                      y: r.top + r.height/2,
-                      left: r.left,
-                      top: r.top,
-                      w: r.width,
-                      h: r.height,
-                      cls: cls.slice(0,60),
-                      tag: el.tagName
-                    });
-                  }
-                  // mais à esquerda e mais acima no grid = melhor no painel julho
-                  out.sort(function(a,b){ return a.left - b.left || a.top - b.top; });
-                  return out;
+                  return best;
                 }
 
-                var d1 = findDays(day1, true);  // SEMPRE no calendário esquerdo o início
-                var d2;
-                if (sameMonth){
-                  d2 = findDays(day2, true);    // fim no MESMO (esquerdo)
-                } else {
-                  d2 = findDays(day2, false).filter(function(c){ return c.left >= midX; });
-                  if (!d2.length) d2 = findDays(day2, false);
-                }
+                var p1 = pick(day1, true);
+                var p2 = pick(day2, sameMonth ? true : false);
+                if (!p2 && sameMonth) p2 = pick(day2, true);
+                if (!p1) return {ok:false, reason:'no_day1', midX:midX, nDays:days.length};
+                if (!p2) return {ok:false, reason:'no_day2', midX:midX, p1:p1, nDays:days.length};
 
+                // clique nativo no elemento Lightpick (melhor que só CDP)
+                function tap(info){
+                  try { info.el.scrollIntoView({block:'center'}); } catch(e){}
+                  try { info.el.click(); } catch(e){}
+                  try {
+                    var o = {bubbles:true,cancelable:true,view:window,
+                      clientX:info.x, clientY:info.y, button:0};
+                    info.el.dispatchEvent(new MouseEvent('mousedown', o));
+                    info.el.dispatchEvent(new MouseEvent('mouseup', o));
+                    info.el.dispatchEvent(new MouseEvent('click', o));
+                  } catch(e){}
+                }
+                tap(p1);
                 return {
-                  ok: d1.length > 0 && d2.length > 0,
+                  ok: true,
+                  needSecond: true,
+                  p1: {x:p1.x, y:p1.y, left:p1.left, cls:p1.cls},
+                  p2: {x:p2.x, y:p2.y, left:p2.left, cls:p2.cls},
                   midX: midX,
-                  root: {x: rootR.left, y: rootR.top, w: rootR.width, h: rootR.height},
-                  day1: d1.slice(0,5),
-                  day2: d2.slice(0,5),
-                  n1: d1.length,
-                  n2: d2.length
+                  nDays: days.length
                 };
                 """,
                 data_ini.day,
                 data_fim.day,
                 same_month,
             )
-            logger.info("Células calendário: %s", hits)
+            logger.info("Lightpick pick: %s", result)
             try:
                 self._trace(
                     "data_dias_achados",
-                    f"d1={hits.get('n1')} d2={hits.get('n2')} "
-                    f"day1={hits.get('day1')} day2={hits.get('day2')}",
+                    f"lightpick={result}",
                     shot=True,
                 )
             except Exception:
                 pass
 
-            if hits and hits.get("ok"):
-                c1 = (hits.get("day1") or [None])[0]
-                c2 = (hits.get("day2") or [None])[0]
-                if c1 and c2:
-                    # clique real CDP no centro da bolinha do dia
-                    ok1 = self._cdp_click_xy(c1["x"], c1["y"])
-                    self._sleep(0.35)
-                    ok2 = self._cdp_click_xy(c2["x"], c2["y"])
-                    self._sleep(0.25)
-                    # reforço: click JS no elementFromPoint
-                    try:
-                        d.execute_script(
-                            """
-                            function tap(x,y){
-                              var el = document.elementFromPoint(x,y);
-                              if (!el) return false;
-                              var p = el;
-                              for (var i=0;i<5 && p;i++){
-                                var t = (p.innerText||'').replace(/\\s+/g,'').trim();
-                                if (/^\\d{1,2}$/.test(t)){ p.click(); return t; }
-                                p = p.parentElement;
-                              }
-                              el.click();
-                              return true;
-                            }
-                            return {a: tap(arguments[0], arguments[1]),
-                                    b: tap(arguments[2], arguments[3])};
-                            """,
-                            c1["x"],
-                            c1["y"],
-                            c2["x"],
-                            c2["y"],
-                        )
-                    except Exception:
-                        pass
-                    logger.info(
-                        "Clicou dias no 1º calendário: %s@%.0f,%.0f → %s@%.0f,%.0f cdp=%s/%s",
-                        data_ini.day,
-                        c1["x"],
-                        c1["y"],
-                        data_fim.day,
-                        c2["x"],
-                        c2["y"],
-                        ok1,
-                        ok2,
-                    )
-                    return True
-            else:
-                logger.warning(
-                    "Não achou células dos dias %s e %s no painel esquerdo: %s",
+            if result and result.get("ok"):
+                p1, p2 = result.get("p1") or {}, result.get("p2") or {}
+                # 1º dia
+                if p1.get("x"):
+                    self._cdp_click_xy(p1["x"], p1["y"])
+                self._sleep(0.4)
+                # 2º dia (mesmo painel se same month)
+                d.execute_script(
+                    """
+                    var day2 = arguments[0], sameMonth = arguments[1], midX = arguments[2];
+                    var days = document.querySelectorAll(
+                      '.lightpick__day.is-available, .lightpick__day:not(.is-disabled)'
+                    );
+                    if (!days.length) days = document.querySelectorAll('.lightpick__day');
+                    for (var i=0;i<days.length;i++){
+                      var el = days[i];
+                      var cls = (el.className&&el.className.toString)||'';
+                      if (/is-previous-month|is-next-month|is-disabled/.test(cls)) continue;
+                      var t = (el.innerText||'').replace(/\\s+/g,'').trim();
+                      if (t !== String(day2)) continue;
+                      var r = el.getBoundingClientRect();
+                      if (sameMonth && midX && r.left >= midX - 4) continue;
+                      el.click();
+                      try {
+                        var o = {bubbles:true,cancelable:true,view:window,
+                          clientX:r.left+r.width/2, clientY:r.top+r.height/2, button:0};
+                        el.dispatchEvent(new MouseEvent('mousedown', o));
+                        el.dispatchEvent(new MouseEvent('mouseup', o));
+                        el.dispatchEvent(new MouseEvent('click', o));
+                      } catch(e){}
+                      return true;
+                    }
+                    return false;
+                    """,
+                    data_fim.day,
+                    same_month,
+                    result.get("midX"),
+                )
+                if p2.get("x"):
+                    self._cdp_click_xy(p2["x"], p2["y"])
+                self._sleep(0.35)
+                logger.info(
+                    "Lightpick clicou %s → %s",
                     data_ini.day,
                     data_fim.day,
-                    hits,
                 )
+                return True
         except Exception as e:
-            logger.warning("select calendar cells: %s", e)
+            logger.warning("lightpick select: %s", e)
 
-        # Estratégia B: Selenium XPath + só metade esquerda da tela do calendário
+        # Fallback: geometria genérica + selenium
         try:
             return self._select_range_selenium_days(data_ini, data_fim)
         except Exception as e:
@@ -3127,20 +3180,43 @@ class SitraxBot:
 
             self._save_debug(f"data_apos_calendario_{attempt}")
 
-            # 4) Filtrar do popup (aplica)
-            if not self._click_popup_filtrar():
-                # tenta Filtrar pequeno perto de Fechar
+            # Confere se o popup já tem Home/End corretos (ex.: 10/07 e 11/07)
+            pop_ini, pop_fim = self._popup_home_end_dates()
+            logger.info(
+                "Popup Home/End após calendário: %s → %s (pedido %s → %s)",
+                pop_ini,
+                pop_fim,
+                ini_br,
+                fim_br,
+            )
+            self._trace(
+                f"data_popup_datas_{attempt}",
+                f"Home={pop_ini} End={pop_fim} pedido={ini_br}→{fim_br}",
+                shot=True,
+            )
+
+            # 4) Filter do popup — OBRIGATÓRIO para gravar no chip
+            #    (debug mostrou Home/End certos mas Filter não clicado)
+            filtered = False
+            for ft in range(3):
+                if self._click_popup_filtrar():
+                    filtered = True
+                    break
+                self._sleep(0.3)
+            if not filtered:
+                logger.warning("Filter do popup falhou — tenta de novo")
                 try:
                     d.execute_script(
                         """
-                        var btns = document.querySelectorAll('button,a,input[type=button]');
+                        var btns = document.querySelectorAll('button');
                         for (var i=0;i<btns.length;i++){
-                          var t = (btns[i].innerText||btns[i].value||'').trim();
-                          if (t==='Filtrar' || t==='Filter'){
-                            var r = btns[i].getBoundingClientRect();
-                            if (r.width > 40 && r.width < 200 && r.top > 80){
-                              btns[i].click(); return true;
-                            }
+                          var t = (btns[i].innerText||'').trim();
+                          if (t !== 'Filter' && t !== 'Filtrar') continue;
+                          var r = btns[i].getBoundingClientRect();
+                          if (r.width > 50 && r.width < 180 && r.height > 20 && r.height < 60){
+                            // laranja típico do Sitrax
+                            btns[i].click();
+                            return true;
                           }
                         }
                         return false;
@@ -3148,24 +3224,66 @@ class SitraxBot:
                     )
                 except Exception:
                     pass
-            self._wait_loader_gone(25)
-            self._sleep(0.6)
-            self._close_date_popup_if_open()
-            self._sleep(0.4)
 
-            chip_now = self._read_date_chip_text()
+            self._wait_loader_gone(30)
+            self._sleep(0.8)
+            # se popup ainda aberto com Close, tenta Filter outra vez
+            if self._popup_filtro_data_open():
+                self._click_popup_filtrar()
+                self._sleep(0.5)
+            self._close_date_popup_if_open()
+            self._sleep(0.5)
+
+            # 5) valida chip (tenta ler 3x — às vezes vazio logo após Filter)
+            chip_now = ""
+            for _ in range(4):
+                chip_now = self._read_date_chip_text()
+                if chip_now:
+                    break
+                self._sleep(0.4)
+
+            # sucesso se chip bate OU se popup já tinha as datas certas e Filter foi clicado
+            pop_ok = (
+                pop_ini == ini_br
+                and (pop_fim == fim_br or (not multi_day and pop_fim == ini_br))
+            )
+            chip_ok = self._date_chip_matches(data_ini, data_fim)
+            # chip com as duas datas mesmo se reader parcial
+            if not chip_ok and chip_now:
+                dates = re.findall(r"\d{2}/\d{2}/\d{4}", chip_now)
+                if dates and dates[0] == ini_br and (
+                    dates[-1] == fim_br or (len(dates) == 1 and not multi_day)
+                ):
+                    chip_ok = True
+
             self._trace(
                 f"data_apos_fill_{attempt}",
-                f"pedido {ini_br}→{fim_br} multi={multi_day} | chip={chip_now!r}",
+                f"pedido {ini_br}→{fim_br} multi={multi_day} | "
+                f"chip={chip_now!r} pop_ok={pop_ok} chip_ok={chip_ok} filter={filtered}",
                 shot=True,
             )
-            if self._date_chip_matches(data_ini, data_fim):
-                logger.info("Data filtro OK: %s → %s", ini_br, fim_br)
+            if chip_ok or (pop_ok and filtered):
+                logger.info(
+                    "Data filtro OK: %s → %s (chip_ok=%s pop_ok=%s)",
+                    ini_br,
+                    fim_br,
+                    chip_ok,
+                    pop_ok,
+                )
+                # se chip ainda não atualizou mas popup ok, clica Filter principal da barra
+                if not chip_ok and pop_ok:
+                    try:
+                        self.click_filtrar()
+                        self._wait_loader_gone(20)
+                    except Exception:
+                        pass
                 return
             logger.warning(
-                "Data ainda errada (tentativa %s): chip=%r queria %s→%s",
+                "Data ainda errada (tentativa %s): chip=%r pop=%s→%s queria %s→%s",
                 attempt,
                 chip_now,
+                pop_ini,
+                pop_fim,
                 ini_br,
                 fim_br,
             )
