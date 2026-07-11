@@ -270,6 +270,11 @@ def _run_one_worker(
                             or bot.showing_zero_records()
                         )
 
+                    # Contador do rodapé Sitrax (fonte da verdade visual)
+                    site_n = bot.count_sitrax_registers()
+                    if site_n < 0:
+                        site_n = 0 if empty_legit else -1
+
                     texto = build_narrative_report(
                         pl,
                         positions,
@@ -291,7 +296,31 @@ def _run_one_worker(
                         data_ref=data_ref,
                         cliente=v.get("cliente", ""),
                     )
-                    ok_result = n_pts > 0 or empty_legit
+                    # OK se: vazio real, ou scrape razoável vs site
+                    if empty_legit:
+                        ok_result = True
+                    elif site_n > 0 and n_pts == 0:
+                        ok_result = False
+                    elif site_n > 0 and n_pts < int(site_n * 0.85):
+                        ok_result = False
+                    else:
+                        ok_result = n_pts > 0 or empty_legit
+
+                    # Verificação com FOTO (sempre, mesmo quiet) — limpa na próxima frota
+                    try:
+                        debug_session.add_plate_verify(
+                            pl,
+                            site_count=max(0, site_n),
+                            scrape_count=n_pts,
+                            driver=bot._d() if bot else None,
+                            message=(
+                                f"Site: {site_n if site_n >= 0 else '?'} · "
+                                f"Pesquisa: {n_pts}"
+                            ),
+                        )
+                    except Exception as ve:
+                        logger.warning("verify %s: %s", pl, ve)
+
                     results.append(
                         PlateResult(
                             order=order,
@@ -304,18 +333,24 @@ def _run_one_worker(
                             error="" if ok_result else "0 posições (não confirmado)",
                         )
                     )
-                    if n_pts > 0:
+                    site_label = str(site_n) if site_n >= 0 else "?"
+                    if n_pts > 0 and ok_result:
                         step_name = f"w{worker_id+1}_ok_{pl}"
-                        step_msg = f"Chrome {worker_id+1}: {pl} → {n_pts} pts"
+                        step_msg = (
+                            f"Chrome {worker_id+1}: {pl} → "
+                            f"site {site_label} / pesquisa {n_pts}"
+                        )
                     elif empty_legit:
                         step_name = f"w{worker_id+1}_vazio_ok_{pl}"
                         step_msg = (
-                            f"Chrome {worker_id+1}: {pl} → 0 pts "
-                            "(Sitrax Mostrando: 0 — OK, sem retry)"
+                            f"Chrome {worker_id+1}: {pl} → site 0 / pesquisa 0 (OK)"
                         )
                     else:
                         step_name = f"w{worker_id+1}_zero_{pl}"
-                        step_msg = f"Chrome {worker_id+1}: {pl} → 0 pts"
+                        step_msg = (
+                            f"Chrome {worker_id+1}: {pl} → "
+                            f"site {site_label} / pesquisa {n_pts}"
+                        )
                     debug_session.step(
                         step_name,
                         step_msg,

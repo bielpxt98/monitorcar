@@ -254,6 +254,41 @@
     </div>
     {% endif %}
 
+    {% if verify %}
+    <div class="card" style="border-color:#fb923c">
+      <h2>Verificação Sitrax × pesquisa</h2>
+      <p class="hint" style="margin-top:0">
+        Compara o rodapé do site (<em>Mostrando: N</em>) com o que o robô leu.
+        Limpa na próxima frota. Detalhes + fotos em <a href="/debug" style="color:#fb923c">/debug</a>.
+      </p>
+      <div style="overflow-x:auto">
+        <table style="width:100%;border-collapse:collapse;font-size:.88rem">
+          <thead>
+            <tr style="text-align:left;color:var(--muted);border-bottom:1px solid var(--border)">
+              <th style="padding:.45rem .35rem">Placa</th>
+              <th style="padding:.45rem .35rem">Site</th>
+              <th style="padding:.45rem .35rem">Pesquisa</th>
+              <th style="padding:.45rem .35rem">OK?</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for v in verify %}
+            <tr style="border-bottom:1px solid var(--border)">
+              <td style="padding:.45rem .35rem"><strong>{{ v.placa }}</strong></td>
+              <td style="padding:.45rem .35rem">{{ v.site_count }}</td>
+              <td style="padding:.45rem .35rem">{{ v.scrape_count }}</td>
+              <td style="padding:.45rem .35rem">
+                {% if v.ok %}<span style="color:#4ade80">site {{ v.site_count }} · pesquisa {{ v.scrape_count }}</span>
+                {% else %}<span style="color:#f87171">site {{ v.site_count }} · pesquisa {{ v.scrape_count }}</span>{% endif %}
+              </td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </div>
+    {% endif %}
+
     {% if texto or has_pdf %}
     <div class="card">
       <h2>Seu resumo</h2>

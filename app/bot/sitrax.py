@@ -2448,23 +2448,39 @@ class SitraxBot:
 
     def showing_zero_records(self) -> bool:
         """True se a grade mostra explicitamente 0 registros (PT/EN)."""
-        try:
-            return bool(
+        return self.count_sitrax_registers() == 0 and (
+            self.sitrax_says_no_records()
+            or bool(
                 self._d().execute_script(
                     """
                     var body = ((document.body && document.body.innerText) || '');
-                    if (/mostrando\\s*:\\s*0\\b/i.test(body)) return true;
-                    if (/showing\\s*:\\s*0\\b/i.test(body)) return true;
-                    if (/\\b0\\s*registro/i.test(body) && !/\\b[1-9]\\d*\\s*registro/i.test(body))
-                      return true;
-                    if (/\\b0\\s*register/i.test(body) && !/\\b[1-9]\\d*\\s*register/i.test(body))
-                      return true;
-                    return false;
+                    return /mostrando\\s*:\\s*0\\b/i.test(body)
+                        || /showing\\s*:\\s*0\\b/i.test(body);
                     """
                 )
             )
+        )
+
+    def count_sitrax_registers(self) -> int:
+        """
+        Lê o contador do rodapé Sitrax: 'Mostrando: 510 Registro(s)' / 'Showing: 510'.
+        -1 se não achar o número.
+        """
+        try:
+            n = self._d().execute_script(
+                """
+                var body = ((document.body && document.body.innerText) || '');
+                var m = body.match(/Mostrando\\s*:\\s*(\\d+)/i)
+                     || body.match(/Showing\\s*:\\s*(\\d+)/i)
+                     || body.match(/(\\d+)\\s*Registro\\(s\\)/i)
+                     || body.match(/(\\d+)\\s*Register\\(s\\)/i);
+                if (m) return parseInt(m[1], 10);
+                return -1;
+                """
+            )
+            return int(n) if n is not None else -1
         except Exception:
-            return False
+            return -1
 
     def grid_has_data_rows(self) -> bool:
         """True se há linhas com data GPS na grade (scrape falhou mas tem dado)."""

@@ -125,6 +125,24 @@ async def home(request: Request):
         if _JOB.get("done") and not _LAST_REPORT.get("pdf_bytes")
         else None
     )
+    verify = []
+    try:
+        from app.bot.debug_session import get_verify
+
+        verify = [
+            {
+                "placa": v.placa,
+                "site_count": v.site_count,
+                "scrape_count": v.scrape_count,
+                "ok": v.ok,
+                "message": v.message,
+                "t": v.t,
+                "image_b64": v.image_b64,
+            }
+            for v in get_verify()
+        ]
+    except Exception:
+        pass
     return templates.TemplateResponse(
         request,
         "index.html",
@@ -139,6 +157,7 @@ async def home(request: Request):
             "job_msg": flash.get("job_msg"),
             "job_running": bool(_JOB.get("running")),
             "job_status": _JOB.get("message") or "",
+            "verify": verify,
         },
     )
 
@@ -260,6 +279,21 @@ def _run_job(modo: str, placa: str, d_ini: date, d_fim: date):
                             pdf_writer.add_page(page)
                     except Exception as e:
                         logger.warning("PDF %s: %s", r.placa, e)
+
+            # resumo verificação site x pesquisa (para home)
+            try:
+                ver = debug_session.get_verify()
+                if ver:
+                    lines_v = ["📊 Verificação Sitrax × pesquisa:"]
+                    for v in ver:
+                        mark = "✅" if v.ok else "❌"
+                        lines_v.append(
+                            f"  {mark} {v.placa}: site {v.site_count} · "
+                            f"pesquisa {v.scrape_count}"
+                        )
+                    textos.insert(0, "\n".join(lines_v))
+            except Exception:
+                pass
 
         out = io.BytesIO()
         if len(pdf_writer.pages) == 0:
@@ -546,10 +580,11 @@ async def health():
 @app.get("/debug", response_class=HTMLResponse)
 async def debug_panel(request: Request):
     """Painel de calibração: última execução do robô com fotos de cada passo."""
-    from app.bot.debug_session import get_last_run
+    from app.bot.debug_session import get_last_run, get_verify
     from app.bot.warm_pool import warm_pool
 
     run = get_last_run()
+    verify = get_verify()
     return templates.TemplateResponse(
         request,
         "debug.html",
@@ -558,6 +593,7 @@ async def debug_panel(request: Request):
             "configured": sitrax_configured(),
             "warm": warm_pool.snapshot(),
             "today": date.today().isoformat(),
+            "verify": verify,
         },
     )
 

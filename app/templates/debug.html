@@ -132,11 +132,59 @@
       </p>
     </div>
 
-    {% if not run %}
+    {% if verify %}
+    <div class="card">
+      <h2 style="font-size:1.05rem;margin:0 0 .5rem">Verificação Sitrax × pesquisa</h2>
+      <p class="hint" style="margin:0 0 .75rem">
+        Por placa: o que o site mostrou (rodapé) vs o que o robô leu.
+        Limpa a cada nova frota. Verde = ok · Vermelho = divergente.
+      </p>
+      <table style="width:100%;border-collapse:collapse;font-size:.9rem;margin-bottom:.5rem">
+        <thead>
+          <tr style="text-align:left;color:var(--muted)">
+            <th style="padding:.35rem">Placa</th>
+            <th style="padding:.35rem">Site</th>
+            <th style="padding:.35rem">Pesquisa</th>
+            <th style="padding:.35rem">Status</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for v in verify %}
+          <tr style="border-top:1px solid var(--border)">
+            <td style="padding:.4rem"><strong>{{ v.placa }}</strong></td>
+            <td style="padding:.4rem">{{ v.site_count }}</td>
+            <td style="padding:.4rem">{{ v.scrape_count }}</td>
+            <td style="padding:.4rem">
+              {% if v.ok %}<span class="status-ok">OK</span>
+              {% else %}<span class="status-err">ERRO</span>{% endif %}
+            </td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% for v in verify %}
+    <div class="card step {% if v.ok %}ok{% else %}fail{% endif %}">
+      <div><strong>{{ v.t }}</strong> — {{ v.placa }}</div>
+      <div>Site: <strong>{{ v.site_count }}</strong> · Pesquisa: <strong>{{ v.scrape_count }}</strong>
+        {% if v.ok %} · <span class="status-ok">bateu</span>
+        {% else %} · <span class="status-err">divergente</span>{% endif %}
+      </div>
+      {% if v.message %}<div class="meta">{{ v.message }}</div>{% endif %}
+      {% if v.image_b64 %}
+      <img src="data:image/png;base64,{{ v.image_b64 }}" alt="{{ v.placa }}" loading="lazy" />
+      {% endif %}
+    </div>
+    {% endfor %}
+    {% endif %}
+
+    {% if not run and not verify %}
     <div class="card">
       <p>Nenhuma execução ainda. Rode a calibração ou um “Tentar automático” na home.</p>
     </div>
-    {% else %}
+    {% endif %}
+
+    {% if run %}
     <div class="card">
       <p>
         <strong>Início:</strong> {{ run.started }}
@@ -152,7 +200,7 @@
       {% if run.error %}
       <pre style="white-space:pre-wrap;color:#fecaca;font-size:.85rem">{{ run.error }}</pre>
       {% endif %}
-      <p class="hint">{{ run.steps|length }} passo(s) gravados</p>
+      <p class="hint">{{ run.steps|length }} passo(s) gravados (log técnico abaixo)</p>
     </div>
 
     {% for s in run.steps %}
