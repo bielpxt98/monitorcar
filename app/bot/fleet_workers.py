@@ -244,16 +244,16 @@ def _run_one_worker(
                     )
                     positions = positions_from_rows(rows)
                     n_pts = len([p for p in positions if p.when])
-                    # 0 real no Sitrax (Mostrando: 0) = OK, SEM reabrir/retry extra
+                    # 0 legítimo SÓ com confirmação explícita do Sitrax
                     empty_legit = n_pts == 0 and (
                         bot.sitrax_says_no_records()
                         or bot.showing_zero_records()
                     )
 
-                    # Retry SÓ se scrape vazio MAS a grade tem linhas (bug de leitura)
-                    if n_pts == 0 and not empty_legit and bot.grid_has_data_rows():
+                    # Se 0 pts SEM confirmação de vazio → retry (pode ser scrape/filter)
+                    if n_pts == 0 and not empty_legit:
                         logger.warning(
-                            "Worker %s %s: grade com dados mas scrape 0 — 1 retry",
+                            "Worker %s %s: 0 pts sem 'Mostrando: 0' — 1 retry",
                             worker_id + 1,
                             pl,
                         )
@@ -269,24 +269,6 @@ def _run_one_worker(
                             bot.sitrax_says_no_records()
                             or bot.showing_zero_records()
                         )
-                    elif n_pts == 0 and not empty_legit:
-                        # chip errado / filtro falhou — 1 retry
-                        if not bot.vehicle_chip_has_plate(pl):
-                            rows = bot.fetch_positions_for_fleet_plate(
-                                pl,
-                                data_ini=data_ini,
-                                data_fim=data_fim,
-                                clear_previous=True,
-                            )
-                            positions = positions_from_rows(rows)
-                            n_pts = len([p for p in positions if p.when])
-                            empty_legit = n_pts == 0 and (
-                                bot.sitrax_says_no_records()
-                                or bot.showing_zero_records()
-                            )
-                        else:
-                            # chip ok + 0 linhas = trata como vazio legítimo
-                            empty_legit = True
 
                     texto = build_narrative_report(
                         pl,

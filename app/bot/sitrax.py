@@ -2604,16 +2604,25 @@ class SitraxBot:
             except Exception as e:
                 logger.warning("re-Filter %s: %s", placa_u, e)
 
-            n_hint = self.wait_positions_grid(timeout=18)
+            n_hint = self.wait_positions_grid(timeout=28)
+            # se ainda 0 e SEM mensagem de vazio: Filter de novo e espera mais
+            if n_hint == 0 and not (
+                self.sitrax_says_no_records() or self.showing_zero_records()
+            ):
+                try:
+                    self.click_filtrar()
+                except Exception:
+                    pass
+                n_hint = self.wait_positions_grid(timeout=20)
+
             self.try_scroll_all()
             rows = self.scrape_positions_table()
             last_rows = rows or []
             n_scrape = len(last_rows)
-            zero_real = (
-                self.sitrax_says_no_records()
-                or self.showing_zero_records()
-                or n_hint == 0
-            )
+
+            # Zero REAL só com confirmação explícita do Sitrax — NÃO use n_hint==0
+            # (timeout antes da tabela carregar gerava 0 pts falso, ex. PDY4D85 212 reg)
+            zero_real = self.sitrax_says_no_records() or self.showing_zero_records()
 
             logger.info(
                 "Frota %s tentativa %s: grid~%s scrape=%s zero_real=%s",
@@ -2632,7 +2641,7 @@ class SitraxBot:
                 )
                 return last_rows
 
-            # Sitrax mostrou 0 → resultado válido, NÃO tenta de novo
+            # Sitrax mostrou explicitamente 0 → OK, sem retry
             if zero_real and self.vehicle_chip_has_plate(placa_u):
                 self._trace(
                     f"frota_sem_dados_{placa_u}",
@@ -2642,11 +2651,20 @@ class SitraxBot:
                 )
                 return []
 
-            # Retry só se a grade TEM dados e o scrape falhou (ou chip duvidoso)
-            if attempt == 0 and self.grid_has_data_rows():
+            # Grade com dados mas scrape vazio → retry
+            if attempt == 0 and (self.grid_has_data_rows() or n_hint > 0):
                 self._trace(
                     f"frota_scrape_miss_{placa_u}",
-                    f"{placa_u}: grade com dados mas scrape 0 — 1 retry",
+                    f"{placa_u}: há indício de dados (grid~{n_hint}) mas scrape 0 — retry",
+                    ok=False,
+                )
+                continue
+
+            # n_hint==0 sem toast de vazio: ainda pode ser lento — 1 retry
+            if attempt == 0 and n_hint == 0 and not zero_real:
+                self._trace(
+                    f"frota_grid_lento_{placa_u}",
+                    f"{placa_u}: grade ainda vazia sem msg de 0 — retry",
                     ok=False,
                 )
                 continue
@@ -2654,7 +2672,7 @@ class SitraxBot:
             self._save_debug(
                 f"frota_zero_{placa_u}_t{attempt+1}",
                 f"0 posições para {placa_u} tentativa {attempt+1} "
-                f"(zero_real={zero_real})",
+                f"(zero_real={zero_real} n_hint={n_hint})",
                 ok=False,
             )
             break
