@@ -2382,61 +2382,129 @@ class SitraxBot:
             self._sleep(0.2)
         return False
 
-    def _click_popup_filtrar(self) -> bool:
-        """Clica Filtrar/Filter DENTRO do popup Filter Date (ao lado de Close)."""
+    def _locate_popup_filter_button(self) -> Optional[dict]:
+        """
+        Localiza o botão laranja Filter/Filtrar do popup Filter Date
+        (ao lado de Close) — NÃO o Filter grande da barra.
+        Retorna {x,y,w,h,t} ou None.
+        """
         d = self._d()
         try:
-            ok = d.execute_script(
+            return d.execute_script(
                 """
                 function norm(s){ return (s||'').replace(/\\s+/g,' ').trim(); }
-                // 1) botão laranja pequeno perto de Close/Fechar no Filter Date
                 var nodes = document.querySelectorAll('button,a,input[type=button],input[type=submit]');
                 var candidates = [];
                 for (var i=0;i<nodes.length;i++){
                   var el = nodes[i];
                   var t = norm(el.innerText || el.value || '');
-                  if (t !== 'Filtrar' && t !== 'Filter') continue;
+                  if (t !== 'Filter' && t !== 'Filtrar') continue;
                   var r = el.getBoundingClientRect();
-                  if (r.width < 30 || r.height < 18) continue;
-                  if (r.width > 200) continue; // barra principal é larga
-                  var p = el, ctx = '';
-                  for (var k=0;k<8 && p;k++){
-                    ctx += ' ' + norm(p.innerText||'').slice(0,160);
+                  if (r.width < 40 || r.height < 20) continue;
+                  if (r.width > 160) continue; // barra principal costuma ser mais larga
+                  // deve ter Close/Fechar no mesmo "card"
+                  var p = el, ctx = '', hasClose = false, hasHome = false, hasTitle = false;
+                  for (var k=0;k<6 && p;k++){
+                    var pt = norm(p.innerText||'');
+                    if (pt.length < 300) ctx = pt;
+                    if (/\\bClose\\b|\\bFechar\\b/i.test(pt)) hasClose = true;
+                    if (/Home\\s*:|In[ií]cio\\s*:|End\\s*:|Fim\\s*:/i.test(pt)) hasHome = true;
+                    if (/Filter\\s*Date|Filtro\\s*Data|Date\\s*Filter/i.test(pt)) hasTitle = true;
                     p = p.parentElement;
                   }
-                  var inDatePop = /Filter\\s*Date|Date\\s*Filter|Filtro\\s*Data|Home\\s*:|End\\s*:|In[ií]cio|Close|Fechar/i.test(ctx);
-                  if (!inDatePop) continue;
-                  // preferir o que tem Close no mesmo contexto (popup)
-                  var score = r.top + ( /Close|Fechar/i.test(ctx) ? 0 : 50);
-                  candidates.push({el:el, score:score, t:t, w:r.width});
+                  if (!(hasClose || hasHome || hasTitle)) continue;
+                  // irmão Close na mesma linha?
+                  var score = r.top;
+                  if (hasClose && hasHome) score -= 100;
+                  if (hasTitle) score -= 50;
+                  // botão laranja (background)
+                  try {
+                    var bg = window.getComputedStyle(el).backgroundColor || '';
+                    if (/rgb\\(\\s*2[0-5]?\\d/.test(bg) || /255|orange|#f|ff6/i.test(bg))
+                      score -= 30;
+                  } catch(e){}
+                  candidates.push({
+                    x: r.left + r.width/2,
+                    y: r.top + r.height/2,
+                    w: r.width, h: r.height, t: t,
+                    score: score,
+                    close: hasClose, home: hasHome
+                  });
                 }
                 candidates.sort(function(a,b){ return a.score - b.score; });
-                if (candidates.length){
-                  var b = candidates[0].el;
-                  b.scrollIntoView({block:'center'});
-                  b.click();
-                  // reforço mouse
-                  try {
-                    var r = b.getBoundingClientRect();
-                    var o = {bubbles:true,cancelable:true,view:window,
-                      clientX:r.left+r.width/2, clientY:r.top+r.height/2, button:0};
-                    b.dispatchEvent(new MouseEvent('mousedown', o));
-                    b.dispatchEvent(new MouseEvent('mouseup', o));
-                    b.dispatchEvent(new MouseEvent('click', o));
-                  } catch(e){}
-                  return {ok:true, how:'popup_filter', n:candidates.length};
-                }
-                return {ok:false};
+                return candidates.length ? candidates[0] : null;
                 """
             )
-            if ok and ok.get("ok"):
-                logger.info("Clicou Filter do popup de data: %s", ok)
-                return True
-            logger.warning("Filter do popup não achado: %s", ok)
         except Exception as e:
-            logger.warning("click popup filtrar: %s", e)
+            logger.warning("locate popup filter: %s", e)
+            return None
 
-        # Selenium: Filter ao lado de Close
+    def _click_popup_filtrar(self) -> bool:
+        """
+        Clica o Filter laranja do popup Filter Date (ao lado de Close).
+        Usa CDP no centro do botão — o JS click sozinho às vezes não aplica.
+        """
+        d = self._d()
+        loc = self._locate_popup_filter_button()
+        if not loc:
+            logger.warning("Botão Filter do popup Date não localizado")
+            # última tentativa: XPath Close + Filter irmãos
+            try:
+                el = d.execute_script(
+                    """
+                    function norm(s){ return (s||'').replace(/\\s+/g,' ').trim(); }
+                    var closes = document.querySelectorAll('button,a');
+                    for (var i=0;i<closes.length;i++){
+                      var c = closes[i];
+                      if (norm(c.innerText||'') !== 'Close' && norm(c.innerText||'') !== 'Fechar')
+                        continue;
+                      var parent = c.parentElement;
+                      if (!parent) continue;
+                      var btns = parent.querySelectorAll('button,a');
+                      for (var j=0;j<btns.length;j++){
+                        var t = norm(btns[j].innerText||'');
+                        if (t === 'Filter' || t === 'Filtrar'){
+                          var r = btns[j].getBoundingClientRect();
+                          return {x:r.left+r.width/2, y:r.top+r.height/2, w:r.width, h:r.height, t:t};
+                        }
+                      }
+                    }
+                    return null;
+                    """
+                )
+                loc = el
+            except Exception:
+                loc = None
+        if not loc:
+            return False
+
+        logger.info("Filter popup em (%.0f,%.0f) %sx%s", loc.get("x"), loc.get("y"), loc.get("w"), loc.get("h"))
+        # 1) CDP real
+        if loc.get("x") and loc.get("y"):
+            self._cdp_click_xy(loc["x"], loc["y"])
+            self._sleep(0.25)
+        # 2) elementFromPoint + click
+        try:
+            d.execute_script(
+                """
+                var x = arguments[0], y = arguments[1];
+                var el = document.elementFromPoint(x, y);
+                if (!el) return false;
+                var p = el;
+                for (var i=0;i<5 && p;i++){
+                  var t = (p.innerText||p.value||'').replace(/\\s+/g,' ').trim();
+                  if (t === 'Filter' || t === 'Filtrar'){ p.click(); return true; }
+                  p = p.parentElement;
+                }
+                el.click();
+                return true;
+                """,
+                loc["x"],
+                loc["y"],
+            )
+        except Exception:
+            pass
+        # 3) Selenium ActionChains no botão
         try:
             for el in d.find_elements(
                 By.XPATH,
@@ -2445,30 +2513,23 @@ class SitraxBot:
                 if not el.is_displayed():
                     continue
                 w = el.size.get("width", 0) or 0
-                if w > 200 or w < 30:
+                if w > 160 or w < 40:
                     continue
                 try:
-                    parent = el.find_element(By.XPATH, "./..")
-                    pt = (parent.text or "")[:120]
+                    parent_txt = (el.find_element(By.XPATH, "./..").text or "")[:100]
                 except Exception:
-                    pt = ""
+                    parent_txt = ""
                 if not any(
-                    x in pt
-                    for x in ("Close", "Fechar", "Home", "End", "Início", "Filter Date", "Filtro")
+                    x in parent_txt
+                    for x in ("Close", "Fechar", "Home", "End", "Filter Date", "Filtro")
                 ):
-                    # ainda tenta se for botão laranja pequeno
-                    cls = (el.get_attribute("class") or "").lower()
-                    if "orange" not in cls and "primary" not in cls and "btn" not in cls:
-                        continue
-                try:
-                    ActionChains(d).move_to_element(el).pause(0.1).click().perform()
-                except Exception:
-                    self._click(el)
-                logger.info("Clicou Filter popup (selenium)")
-                return True
+                    continue
+                ActionChains(d).move_to_element(el).pause(0.12).click().perform()
+                logger.info("Filter popup via ActionChains")
+                break
         except Exception as e:
-            logger.warning("selenium popup filter: %s", e)
-        return False
+            logger.warning("ActionChains filter popup: %s", e)
+        return True
 
     def _popup_home_end_dates(self) -> tuple[Optional[str], Optional[str]]:
         """Lê Home/Início e End/Fim do popup Filter Date. Retorna (ini_br, fim_br)."""
@@ -3259,26 +3320,46 @@ class SitraxBot:
                 shot=True,
             )
 
-            # 4) Filter do popup — OBRIGATÓRIO para gravar no chip
-            #    (debug mostrou Home/End certos mas Filter não clicado)
-            filtered = False
-            for ft in range(3):
-                if self._click_popup_filtrar():
-                    filtered = True
+            # 4) Filter do popup — OBRIGATÓRIO (não só clicar: popup TEM que FECHAR)
+            pop_ok = (
+                pop_ini == ini_br
+                and (pop_fim == fim_br or (not multi_day and pop_fim == ini_br))
+            )
+            if not pop_ok:
+                logger.warning(
+                    "Home/End ainda errados antes do Filter: %s→%s",
+                    pop_ini,
+                    pop_fim,
+                )
+
+            popup_closed = False
+            for ft in range(5):
+                if not self._popup_filtro_data_open():
+                    popup_closed = True
+                    logger.info("Popup Filter Date já fechado (ft=%s)", ft)
                     break
-                self._sleep(0.3)
-            if not filtered:
-                logger.warning("Filter do popup falhou — tenta de novo")
+                logger.info("Clicando Filter do popup (tentativa %s)…", ft + 1)
+                self._click_popup_filtrar()
+                self._sleep(0.55)
+                # sucesso real = popup sumiu (Home/End/Close sumiram)
+                if not self._popup_filtro_data_open():
+                    popup_closed = True
+                    logger.info("Filter aplicou — popup fechou")
+                    break
+                self._sleep(0.35)
+
+            if not popup_closed and self._popup_filtro_data_open():
+                # último recurso: Enter no botão / form
                 try:
                     d.execute_script(
                         """
-                        var btns = document.querySelectorAll('button');
+                        var box = document.getElementById('idFiltroDataIni');
+                        var root = box || document.body;
+                        var btns = root.querySelectorAll('button');
                         for (var i=0;i<btns.length;i++){
                           var t = (btns[i].innerText||'').trim();
-                          if (t !== 'Filter' && t !== 'Filtrar') continue;
-                          var r = btns[i].getBoundingClientRect();
-                          if (r.width > 50 && r.width < 180 && r.height > 20 && r.height < 60){
-                            // laranja típico do Sitrax
+                          if (t === 'Filter' || t === 'Filtrar'){
+                            btns[i].focus();
                             btns[i].click();
                             return true;
                           }
@@ -3286,70 +3367,89 @@ class SitraxBot:
                         return false;
                         """
                     )
+                    self._sleep(0.6)
+                    popup_closed = not self._popup_filtro_data_open()
                 except Exception:
                     pass
 
-            self._wait_loader_gone(30)
-            self._sleep(0.8)
-            # se popup ainda aberto com Close, tenta Filter outra vez
-            if self._popup_filtro_data_open():
-                self._click_popup_filtrar()
-                self._sleep(0.5)
-            self._close_date_popup_if_open()
-            self._sleep(0.5)
+            self._trace(
+                f"data_apos_filter_btn_{attempt}",
+                f"popup_closed={popup_closed} pop_ok={pop_ok} "
+                f"Home={pop_ini} End={pop_fim}",
+                shot=True,
+            )
 
-            # 5) valida chip (tenta ler 3x — às vezes vazio logo após Filter)
+            if not popup_closed:
+                # NÃO desiste fingindo sucesso — tenta de novo o fluxo
+                logger.warning(
+                    "Filter do popup NÃO fechou o popup (tentativa %s) — não avança",
+                    attempt,
+                )
+                self._save_debug(f"data_filter_nao_aplicou_{attempt}")
+                # fecha com Close e recomeça
+                try:
+                    d.execute_script(
+                        """
+                        var nodes = document.querySelectorAll('button,a');
+                        for (var i=0;i<nodes.length;i++){
+                          var t = (nodes[i].innerText||'').trim();
+                          if (t === 'Close' || t === 'Fechar'){ nodes[i].click(); return true; }
+                        }
+                        return false;
+                        """
+                    )
+                except Exception:
+                    pass
+                self._close_date_popup_if_open()
+                continue
+
+            self._wait_loader_gone(30)
+            self._sleep(0.7)
+
+            # 5) valida chip — SE popup fechou com Home/End certos, OK
             chip_now = ""
-            for _ in range(4):
+            for _ in range(5):
                 chip_now = self._read_date_chip_text()
                 if chip_now:
                     break
-                self._sleep(0.4)
+                self._sleep(0.35)
 
-            # sucesso se chip bate OU se popup já tinha as datas certas e Filter foi clicado
-            pop_ok = (
-                pop_ini == ini_br
-                and (pop_fim == fim_br or (not multi_day and pop_fim == ini_br))
-            )
             chip_ok = self._date_chip_matches(data_ini, data_fim)
-            # chip com as duas datas mesmo se reader parcial
             if not chip_ok and chip_now:
                 dates = re.findall(r"\d{2}/\d{2}/\d{4}", chip_now)
-                if dates and dates[0] == ini_br and (
-                    dates[-1] == fim_br or (len(dates) == 1 and not multi_day)
-                ):
+                if dates and dates[0] == ini_br and dates[-1] == fim_br:
                     chip_ok = True
 
             self._trace(
                 f"data_apos_fill_{attempt}",
-                f"pedido {ini_br}→{fim_br} multi={multi_day} | "
-                f"chip={chip_now!r} pop_ok={pop_ok} chip_ok={chip_ok} filter={filtered}",
+                f"pedido {ini_br}→{fim_br} | chip={chip_now!r} "
+                f"pop_ok={pop_ok} chip_ok={chip_ok} popup_closed={popup_closed}",
                 shot=True,
             )
-            if chip_ok or (pop_ok and filtered):
+
+            # sucesso: popup fechou E (chip ok OU home/end estavam certos)
+            if popup_closed and (chip_ok or pop_ok):
                 logger.info(
-                    "Data filtro OK: %s → %s (chip_ok=%s pop_ok=%s)",
+                    "Data filtro OK: %s → %s (chip=%r)",
                     ini_br,
                     fim_br,
-                    chip_ok,
-                    pop_ok,
+                    chip_now,
                 )
-                # se chip ainda não atualizou mas popup ok, clica Filter principal da barra
-                if not chip_ok and pop_ok:
-                    try:
-                        self.click_filtrar()
-                        self._wait_loader_gone(20)
-                    except Exception:
-                        pass
+                # Filter principal da barra (aplica pesquisa no Sitrax)
+                try:
+                    self.click_filtrar()
+                    self._wait_loader_gone(25)
+                except Exception as e:
+                    logger.warning("Filter barra após data: %s", e)
                 return
+
             logger.warning(
-                "Data ainda errada (tentativa %s): chip=%r pop=%s→%s queria %s→%s",
+                "Data ainda errada (tentativa %s): chip=%r pop=%s→%s closed=%s",
                 attempt,
                 chip_now,
                 pop_ini,
                 pop_fim,
-                ini_br,
-                fim_br,
+                popup_closed,
             )
 
         logger.warning(
