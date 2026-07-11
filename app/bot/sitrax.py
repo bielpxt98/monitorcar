@@ -2625,195 +2625,261 @@ class SitraxBot:
 
     def _select_range_on_calendar(self, data_ini: date, data_fim: date) -> bool:
         """
-        No calendário (2 meses): clica dia início e dia fim (range).
-        Equivale a arrastar da primeira data até a selecionada.
+        Seleciona o período no calendário duplo Sitrax.
+
+        Regra (como o usuário mostrou):
+          - Se início e fim estão no MESMO mês → os dois cliques
+            no MESMO painel (ex.: julho: clica 10, depois 11).
+          - O calendário ao lado só se o fim for OUTRO mês.
         """
         d = self._d()
         ini_d, ini_m, ini_y = data_ini.day, data_ini.month, data_ini.year
         fim_d, fim_m, fim_y = data_fim.day, data_fim.month, data_fim.year
-        mes_ini_pt = self._MES_PT[ini_m - 1]
-        mes_fim_pt = self._MES_PT[fim_m - 1]
-        mes_ini_en = self._MES_EN[ini_m - 1]
-        mes_fim_en = self._MES_EN[fim_m - 1]
+        same_month = ini_m == fim_m and ini_y == fim_y
 
-        # navega meses se preciso e clica os dias
         try:
             result = d.execute_script(
                 """
                 var iniDay = arguments[0], iniMonth = arguments[1], iniYear = arguments[2];
                 var fimDay = arguments[3], fimMonth = arguments[4], fimYear = arguments[5];
-                var mesIniPt = arguments[6], mesFimPt = arguments[7];
-                var mesIniEn = arguments[8], mesFimEn = arguments[9];
+                var sameMonth = arguments[6];
                 function norm(s){ return (s||'').replace(/\\s+/g,' ').trim().toLowerCase(); }
                 function visible(el){
                   var r = el.getBoundingClientRect();
-                  return r.width > 0 && r.height > 0 && r.bottom > 0 && r.top < innerHeight + 50;
+                  return r.width > 2 && r.height > 2 && r.bottom > 0 && r.top < innerHeight + 80;
                 }
-                function findCalendarRoot(){
-                  var sels = [
-                    '.daterangepicker', '.datepicker', '.flatpickr-calendar',
-                    '.air-datepicker', '.p-datepicker', '[class*="datepicker"]',
-                    '[class*="daterange"]', '[class*="calendar"]'
-                  ];
+                var MES_PT = ['janeiro','fevereiro','março','abril','maio','junho','julho','agosto','setembro','outubro','novembro','dezembro'];
+                var MES_EN = ['january','february','march','april','may','june','july','august','september','october','november','december'];
+                function monthNum(name){
+                  name = norm(name);
+                  for (var i=0;i<12;i++){
+                    if (name.indexOf(MES_PT[i]) >= 0 || name.indexOf(MES_EN[i]) >= 0) return i+1;
+                  }
+                  return 0;
+                }
+                function monthLabel(m){
+                  return {pt: MES_PT[m-1], en: MES_EN[m-1]};
+                }
+                function findRoot(){
+                  var sels = ['.daterangepicker','.datepicker','[class*="daterange"]','[class*="datepicker"]','[class*="calendar"]'];
                   for (var s=0;s<sels.length;s++){
                     var els = document.querySelectorAll(sels[s]);
                     for (var i=0;i<els.length;i++){
-                      if (visible(els[i]) && els[i].getBoundingClientRect().width > 150)
+                      if (visible(els[i]) && els[i].getBoundingClientRect().width > 200)
                         return els[i];
                     }
                   }
-                  // fallback: div com 2 meses
+                  var best=null, bestW=0;
                   var all = document.querySelectorAll('div');
-                  var best = null, bestW = 0;
                   for (var i=0;i<all.length;i++){
                     var el = all[i];
                     if (!visible(el)) continue;
                     var r = el.getBoundingClientRect();
-                    if (r.width < 280 || r.height < 150 || r.width > 900) continue;
+                    if (r.width < 260 || r.height < 140 || r.width > 900) continue;
                     var t = norm(el.innerText);
                     if (t.length > 900) continue;
-                    var months = 0;
-                    ['janeiro','fevereiro','março','abril','maio','junho','julho','agosto',
-                     'setembro','outubro','novembro','dezembro',
-                     'january','february','march','april','may','june','july','august',
-                     'september','october','november','december'].forEach(function(m){
-                      if (t.indexOf(m) >= 0) months++;
-                    });
-                    if (months >= 1 && /\\b1[0-9]|2[0-9]|3[01]|[1-9]\\b/.test(t)){
+                    var n = 0;
+                    MES_PT.concat(MES_EN).forEach(function(m){ if (t.indexOf(m)>=0) n++; });
+                    if (n >= 1 && /seg|ter|mon|tue|sun|dom/i.test(t)){
                       if (r.width > bestW){ bestW = r.width; best = el; }
                     }
                   }
                   return best;
                 }
-                function monthNameToNum(name){
-                  var pt = ['janeiro','fevereiro','março','abril','maio','junho','julho','agosto','setembro','outubro','novembro','dezembro'];
-                  var en = ['january','february','march','april','may','june','july','august','september','october','november','december'];
-                  name = norm(name);
-                  for (var i=0;i<12;i++){
-                    if (name.indexOf(pt[i]) >= 0 || name.indexOf(en[i]) >= 0) return i+1;
-                  }
-                  return 0;
-                }
-                function clickNav(root, dir){
-                  // dir: -1 prev, +1 next
-                  var arrows = root.querySelectorAll(
-                    'th.prev, th.next, .prev, .next, button, a, span, i, svg'
-                  );
-                  for (var i=0;i<arrows.length;i++){
-                    var el = arrows[i];
-                    if (!visible(el)) continue;
-                    var cls = ((el.className&&el.className.toString)||'') + ' ' + (el.getAttribute('class')||'');
-                    var aria = (el.getAttribute('aria-label')||'') + ' ' + (el.getAttribute('title')||'');
-                    var t = norm(el.innerText||'');
-                    var isPrev = /prev|anterior|left|←|</i.test(cls+' '+aria+' '+t);
-                    var isNext = /next|próximo|proximo|right|→|>/i.test(cls+' '+aria+' '+t);
-                    if (dir < 0 && isPrev){ el.click(); return true; }
-                    if (dir > 0 && isNext){ el.click(); return true; }
-                  }
-                  // setas no canto (← →) sem classe
-                  var tops = root.querySelectorAll('button,a,span,th');
-                  for (var i=0;i<tops.length;i++){
-                    var el = tops[i];
-                    var t = (el.innerText||'').trim();
-                    if (dir < 0 && (t === '←' || t === '<' || t === '‹')){ el.click(); return true; }
-                    if (dir > 0 && (t === '→' || t === '>' || t === '›')){ el.click(); return true; }
-                  }
-                  return false;
-                }
-                function panelMonths(root){
-                  var text = norm(root.innerText).slice(0, 400);
-                  var found = [];
-                  var re = /(janeiro|fevereiro|março|abril|maio|junho|julho|agosto|setembro|outubro|novembro|dezembro|january|february|march|april|may|june|july|august|september|october|november|december)\\s*(\\d{4})?/gi;
-                  var m;
-                  while ((m = re.exec(text)) && found.length < 4){
-                    found.push({month: monthNameToNum(m[1]), year: m[2] ? parseInt(m[2],10) : 0});
-                  }
-                  return found;
-                }
-                function ensureMonthVisible(root, month, year){
-                  for (var attempt=0; attempt<14; attempt++){
-                    var panels = panelMonths(root);
-                    for (var i=0;i<panels.length;i++){
-                      var p = panels[i];
-                      if (p.month === month && (!p.year || p.year === year || year === 0))
-                        return true;
+                function findPanels(root){
+                  // 1) tables laterais (calendário esquerdo / direito)
+                  var tables = root.querySelectorAll('table');
+                  var panels = [];
+                  for (var i=0;i<tables.length;i++){
+                    var tb = tables[i];
+                    if (!visible(tb)) continue;
+                    var r = tb.getBoundingClientRect();
+                    if (r.width < 120 || r.height < 100) continue;
+                    // cabeçalho do mês: sobe e olha texto perto
+                    var header = '';
+                    var p = tb;
+                    for (var k=0;k<5 && p;k++){
+                      var kids = p.children || [];
+                      for (var c=0;c<kids.length;c++){
+                        var ht = norm(kids[c].innerText||'').slice(0,40);
+                        if (monthNum(ht)) { header = ht; break; }
+                      }
+                      if (header) break;
+                      // th / caption
+                      var ths = p.querySelectorAll('th,caption,.month,.datepicker-switch');
+                      for (var t=0;t<ths.length;t++){
+                        var tt = norm(ths[t].innerText||'');
+                        if (monthNum(tt)) { header = tt; break; }
+                      }
+                      if (header) break;
+                      p = p.parentElement;
                     }
-                    // decide direção
-                    var first = panels[0];
-                    var goNext = true;
-                    if (first && first.month){
-                      var cur = first.year * 12 + first.month;
-                      var want = year * 12 + month;
-                      goNext = want > cur;
-                    }
-                    if (!clickNav(root, goNext ? 1 : -1)) return false;
+                    // se não achou header no ancestral próximo, usa retângulo
+                    var mon = monthNum(header);
+                    panels.push({el: tb, month: mon, left: r.left, header: header});
                   }
-                  return false;
+                  // se tables vazias, tenta colunas div
+                  if (panels.length < 1){
+                    var cols = root.querySelectorAll('div');
+                    for (var i=0;i<cols.length;i++){
+                      var el = cols[i];
+                      var r = el.getBoundingClientRect();
+                      if (r.width < 140 || r.width > 320 || r.height < 120 || r.height > 400) continue;
+                      var t = norm(el.innerText||'');
+                      if (t.length > 350) continue;
+                      var mon = 0;
+                      for (var m=0;m<12;m++){
+                        if (t.indexOf(MES_PT[m])===0 || t.indexOf(MES_EN[m])===0
+                            || t.indexOf(MES_PT[m])>=0 && t.indexOf(MES_PT[m])<25
+                            || t.indexOf(MES_EN[m])>=0 && t.indexOf(MES_EN[m])<25){
+                          mon = m+1; break;
+                        }
+                      }
+                      if (!mon) continue;
+                      if (!/\\b1[0-9]|2[0-9]|3[01]|[1-9]\\b/.test(t)) continue;
+                      panels.push({el: el, month: mon, left: r.left, header: t.slice(0,30)});
+                    }
+                  }
+                  panels.sort(function(a,b){ return a.left - b.left; });
+                  // dedupe por left
+                  var uniq = [];
+                  panels.forEach(function(p){
+                    if (!uniq.some(function(u){ return Math.abs(u.left - p.left) < 30; }))
+                      uniq.push(p);
+                  });
+                  return uniq;
                 }
-                function isOffDay(td){
-                  var cls = ((td.className&&td.className.toString)||'').toLowerCase();
-                  if (/off|disabled|old|new|muted|outside|prev-month|next-month|other/i.test(cls))
+                function isOffDay(el){
+                  var cls = ((el.className && el.className.toString) ? el.className.toString() : (el.className||'')).toLowerCase();
+                  if (/\\b(off|disabled|old|new|muted|outside|prev-month|next-month|other|inactive)\\b/i.test(cls))
                     return true;
-                  var aria = (td.getAttribute('aria-disabled')||'');
-                  if (aria === 'true') return true;
-                  var st = (td.getAttribute('style')||'');
-                  if (/opacity:\\s*0\\.[0-4]/i.test(st)) return true;
-                  // texto cinza: cor fraca — difícil; usa class
+                  if ((el.getAttribute('aria-disabled')||'') === 'true') return true;
+                  // dias cinza do mês anterior (29,30) — opacidade/cor fraca
+                  try {
+                    var c = window.getComputedStyle(el).color || '';
+                    var m = c.match(/rgba?\\((\\d+),\\s*(\\d+),\\s*(\\d+)(?:,\\s*([\\d.]+))?\\)/);
+                    if (m){
+                      var r=+m[1], g=+m[2], b=+m[3], a = m[4] !== undefined ? +m[4] : 1;
+                      if (a < 0.45) return true;
+                      // cinza claro (mês vizinho)
+                      if (r > 160 && g > 160 && b > 160 && Math.abs(r-g)<25 && Math.abs(g-b)<25) return true;
+                    }
+                  } catch(e){}
                   return false;
                 }
-                function clickDay(root, day, month, year){
-                  ensureMonthVisible(root, month, year);
-                  // células td/span com o número do dia
-                  var cells = root.querySelectorAll(
-                    'td, span, div, button, a'
-                  );
+                function clickDayInPanel(panel, day){
+                  if (!panel || !panel.el) return {ok:false};
+                  var cells = panel.el.querySelectorAll('td, span, div, button, a');
                   var matches = [];
                   for (var i=0;i<cells.length;i++){
                     var el = cells[i];
                     if (!visible(el)) continue;
-                    if (isOffDay(el)) continue;
-                    var t = (el.innerText||el.textContent||'').replace(/\\s+/g,'').trim();
-                    if (t !== String(day)) continue;
-                    // evita cabeçalho de dia da semana
                     if (el.tagName === 'TH') continue;
+                    if (isOffDay(el)) continue;
+                    // só texto do dia (não "10 July")
+                    var raw = (el.innerText || el.textContent || '').replace(/\\s+/g,' ').trim();
+                    if (raw !== String(day)) continue;
+                    // ignora se tem filhos com outros números (célula composta grande)
+                    if (el.children && el.children.length > 3) continue;
                     var r = el.getBoundingClientRect();
-                    if (r.width < 12 || r.height < 12 || r.width > 80) continue;
-                    // tem que estar em painel do mês certo se possível
-                    var par = el, ctx = '';
-                    for (var k=0;k<6 && par;k++){
-                      ctx += ' ' + norm(par.innerText||'').slice(0,80);
-                      par = par.parentElement;
-                    }
-                    var monOk = true;
-                    var mnamePt = ['','janeiro','fevereiro','março','abril','maio','junho','julho','agosto','setembro','outubro','novembro','dezembro'][month];
-                    var mnameEn = ['','january','february','march','april','may','june','july','august','september','october','november','december'][month];
-                    // se o contexto do painel cita outro mês e não o nosso, pular
-                    // (cells em painel correto preferidos)
-                    var score = r.top + r.left * 0.001;
-                    if (ctx.indexOf(mnamePt) >= 0 || ctx.indexOf(mnameEn) >= 0) score -= 1000;
-                    matches.push({el:el, score:score});
+                    if (r.width < 14 || r.height < 14 || r.width > 70 || r.height > 70) continue;
+                    // tem que estar dentro do painel
+                    var pr = panel.el.getBoundingClientRect();
+                    if (r.left < pr.left - 2 || r.right > pr.right + 2) continue;
+                    if (r.top < pr.top - 2 || r.bottom > pr.bottom + 2) continue;
+                    matches.push({el:el, top:r.top, left:r.left,
+                      x: r.left + r.width/2, y: r.top + r.height/2});
                   }
-                  matches.sort(function(a,b){ return a.score - b.score; });
-                  if (!matches.length) return false;
-                  matches[0].el.click();
-                  return true;
+                  // preferir o do meio do grid (não header)
+                  matches.sort(function(a,b){ return a.top - b.top || a.left - b.left; });
+                  if (!matches.length) return {ok:false, day:day};
+                  var pick = matches[0];
+                  try {
+                    pick.el.scrollIntoView({block:'center'});
+                  } catch(e){}
+                  try { pick.el.click(); } catch(e){}
+                  try {
+                    var opts = {bubbles:true, cancelable:true, view:window,
+                      clientX: pick.x, clientY: pick.y, button:0};
+                    pick.el.dispatchEvent(new MouseEvent('mousedown', opts));
+                    pick.el.dispatchEvent(new MouseEvent('mouseup', opts));
+                    pick.el.dispatchEvent(new MouseEvent('click', opts));
+                  } catch(e){}
+                  return {ok:true, day:day, x:pick.x, y:pick.y, n:matches.length};
+                }
+                function panelForMonth(panels, month){
+                  for (var i=0;i<panels.length;i++){
+                    if (panels[i].month === month) return panels[i];
+                  }
+                  // se mês não identificado no header, usa painel da esquerda (0) para o 1º
+                  return null;
+                }
+                function clickNav(root, dir){
+                  var nodes = root.querySelectorAll('th,button,a,span,i');
+                  for (var i=0;i<nodes.length;i++){
+                    var el = nodes[i];
+                    if (!visible(el)) continue;
+                    var cls = ((el.className&&el.className.toString)||'')+'';
+                    var t = (el.innerText||'').trim();
+                    var aria = (el.getAttribute('aria-label')||'')+(el.getAttribute('title')||'');
+                    var blob = (cls+' '+t+' '+aria).toLowerCase();
+                    if (dir < 0 && /prev|anterior|left|←|‹/.test(blob)){ el.click(); return true; }
+                    if (dir > 0 && /next|pr[oó]ximo|right|→|›/.test(blob)){ el.click(); return true; }
+                  }
+                  return false;
                 }
 
-                var root = findCalendarRoot();
+                var root = findRoot();
                 if (!root) return {ok:false, reason:'sem_calendario'};
 
-                var ok1 = clickDay(root, iniDay, iniMonth, iniYear);
-                if (!ok1) return {ok:false, reason:'sem_dia_ini', day:iniDay};
-
-                // pequeno delay via reflow
-                var ok2 = true;
-                if (fimDay !== iniDay || fimMonth !== iniMonth || fimYear !== iniYear){
-                  ok2 = clickDay(root, fimDay, fimMonth, fimYear);
-                } else {
-                  // mesmo dia: clica de novo no mesmo (range 1 dia)
-                  ok2 = clickDay(root, fimDay, fimMonth, fimYear);
+                // navega até o mês de início aparecer (painel esquerdo)
+                for (var nav=0; nav<14; nav++){
+                  var panels = findPanels(root);
+                  var hasIni = panels.some(function(p){ return p.month === iniMonth; });
+                  if (hasIni || (panels.length && !panels[0].month)) break;
+                  var firstMon = panels[0] && panels[0].month;
+                  var goNext = true;
+                  if (firstMon){
+                    var cur = (iniYear||2026)*12 + (firstMon);
+                    var want = (iniYear||2026)*12 + iniMonth;
+                    // approx without year on panel
+                    goNext = iniMonth > firstMon || (iniMonth < firstMon - 6);
+                    if (firstMon > iniMonth && firstMon - iniMonth < 6) goNext = false;
+                  }
+                  if (!clickNav(root, goNext ? 1 : -1)) break;
                 }
-                return {ok: !!(ok1 && ok2), ok1:ok1, ok2:ok2};
+
+                var panels = findPanels(root);
+                var panelIni = panelForMonth(panels, iniMonth);
+                var panelFim = panelForMonth(panels, fimMonth);
+
+                // MESMO MÊS: força os dois cliques no MESMO painel
+                if (sameMonth){
+                  if (!panelIni && panels.length) panelIni = panels[0]; // esquerda
+                  panelFim = panelIni;
+                } else {
+                  if (!panelIni && panels.length) panelIni = panels[0];
+                  if (!panelFim && panels.length > 1) panelFim = panels[1];
+                  if (!panelFim) panelFim = panelIni;
+                }
+
+                var r1 = clickDayInPanel(panelIni, iniDay);
+                // pequeno gap entre cliques (range)
+                var t0 = Date.now(); while (Date.now() - t0 < 180) {}
+                var r2;
+                if (sameMonth){
+                  // 2º dia no MESMO calendário (não no de lado)
+                  r2 = clickDayInPanel(panelIni, fimDay);
+                } else {
+                  r2 = clickDayInPanel(panelFim, fimDay);
+                }
+
+                return {
+                  ok: !!(r1.ok && r2.ok),
+                  sameMonth: sameMonth,
+                  r1: r1, r2: r2,
+                  panels: panels.map(function(p){ return {month:p.month, header:p.header, left:p.left}; })
+                };
                 """,
                 ini_d,
                 ini_m,
@@ -2821,18 +2887,31 @@ class SitraxBot:
                 fim_d,
                 fim_m,
                 fim_y,
-                mes_ini_pt,
-                mes_fim_pt,
-                mes_ini_en,
-                mes_fim_en,
+                same_month,
             )
-            logger.info("Calendário range: %s", result)
+            logger.info(
+                "Calendário range (mesmo_mes=%s): %s", same_month, result
+            )
             if result and result.get("ok"):
+                # reforço CDP nos pontos dos dias se retornou coordenadas
+                try:
+                    r1, r2 = result.get("r1") or {}, result.get("r2") or {}
+                    if r1.get("x") and r1.get("y"):
+                        self._cdp_click_xy(r1["x"], r1["y"])
+                        self._sleep(0.2)
+                    if r2.get("x") and r2.get("y") and (
+                        r2.get("x") != r1.get("x") or r2.get("y") != r1.get("y")
+                    ):
+                        self._cdp_click_xy(r2["x"], r2["y"])
+                except Exception:
+                    pass
                 return True
+            # se r1 ok e r2 falhou, tenta selenium no mesmo painel
+            if result and (result.get("r1") or {}).get("ok"):
+                self._sleep(0.2)
         except Exception as e:
             logger.warning("select range calendar JS: %s", e)
 
-        # Fallback Selenium: clica números do dia
         try:
             return self._select_range_selenium_days(data_ini, data_fim)
         except Exception as e:
@@ -2840,12 +2919,19 @@ class SitraxBot:
             return False
 
     def _select_range_selenium_days(self, data_ini: date, data_fim: date) -> bool:
-        """Clica dias no calendário via Selenium + arrasta se possível."""
+        """
+        Clica dia início e dia fim no MESMO painel se for o mesmo mês.
+        """
         d = self._d()
+        same_month = (
+            data_ini.month == data_fim.month and data_ini.year == data_fim.year
+        )
+        mes_pt = self._MES_PT[data_ini.month - 1]
+        mes_en = self._MES_EN[data_ini.month - 1]
 
-        def find_day_el(day: int, month: int):
-            mes_pt = self._MES_PT[month - 1]
-            mes_en = self._MES_EN[month - 1]
+        def find_day_in_month_panel(day: int, month: int):
+            mes_p = self._MES_PT[month - 1]
+            mes_e = self._MES_EN[month - 1]
             candidates = []
             for el in d.find_elements(
                 By.XPATH,
@@ -2865,50 +2951,89 @@ class SitraxBot:
                             "new",
                             "muted",
                             "outside",
+                            "inactive",
                         )
                     ):
                         continue
-                    # contexto do mês
+                    # sobe para achar o painel do mês
+                    ctx = ""
                     try:
-                        ctx = (
-                            el.find_element(
-                                By.XPATH, "./ancestor::div[1]"
-                            ).text
-                            or ""
-                        ).lower()
+                        anc = el.find_element(
+                            By.XPATH,
+                            "./ancestor::table[1] | ./ancestor::div[contains(@class,'calendar') "
+                            "or contains(@class,'datepicker') or contains(@class,'month')][1]",
+                        )
+                        ctx = (anc.text or "").lower()[:200]
                     except Exception:
-                        ctx = ""
+                        try:
+                            ctx = (
+                                el.find_element(By.XPATH, "./ancestor::div[3]").text
+                                or ""
+                            ).lower()[:200]
+                        except Exception:
+                            ctx = ""
+                    # exige mês certo no painel (evita clicar 10/11 de AGOSTO)
+                    if mes_p not in ctx and mes_e not in ctx:
+                        # se same month e painel esquerdo sem header claro, ainda aceita
+                        # só se NÃO tiver o outro mês no contexto
+                        other = [
+                            self._MES_PT[m]
+                            for m in range(12)
+                            if m + 1 != month
+                        ] + [
+                            self._MES_EN[m]
+                            for m in range(12)
+                            if m + 1 != month
+                        ]
+                        if any(o in ctx for o in other if o):
+                            continue
                     score = 0
-                    if mes_pt in ctx or mes_en in ctx:
-                        score -= 10
+                    if mes_p in ctx or mes_e in ctx:
+                        score -= 20
+                    # preferir mais à esquerda (1º calendário)
+                    try:
+                        score += int(el.location.get("x", 0) or 0) * 0.001
+                    except Exception:
+                        pass
                     candidates.append((score, el))
                 except Exception:
                     continue
             candidates.sort(key=lambda x: x[0])
             return candidates[0][1] if candidates else None
 
-        el_ini = find_day_el(data_ini.day, data_ini.month)
+        el_ini = find_day_in_month_panel(data_ini.day, data_ini.month)
         if not el_ini:
+            logger.warning(
+                "Selenium: dia %s não achado no painel %s",
+                data_ini.day,
+                mes_pt,
+            )
             return False
-        el_fim = find_day_el(data_fim.day, data_fim.month) or el_ini
+
+        if same_month:
+            el_fim = find_day_in_month_panel(data_fim.day, data_ini.month)
+        else:
+            el_fim = find_day_in_month_panel(data_fim.day, data_fim.month)
+        if not el_fim:
+            el_fim = el_ini
 
         try:
-            # tenta arrastar (mousedown → move → mouseup)
-            ActionChains(d).click_and_hold(el_ini).pause(0.15).move_to_element(
-                el_fim
-            ).pause(0.1).release().perform()
+            # range no mesmo calendário: clique 1º dia, depois 2º (não arrastar entre painéis)
+            self._click(el_ini)
+            self._sleep(0.28)
+            if el_fim is not el_ini:
+                self._click(el_fim)
             logger.info(
-                "Arrastou calendário %s → %s",
-                data_ini,
-                data_fim,
+                "Clicou calendário mesmo_mes=%s: %s dia %s → dia %s",
+                same_month,
+                mes_pt,
+                data_ini.day,
+                data_fim.day,
             )
             return True
         except Exception:
             try:
-                self._click(el_ini)
-                self._sleep(0.25)
-                if el_fim is not el_ini:
-                    self._click(el_fim)
+                ActionChains(d).click(el_ini).pause(0.25).click(el_fim).perform()
                 return True
             except Exception:
                 return False
