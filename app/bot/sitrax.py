@@ -3132,10 +3132,9 @@ class SitraxBot:
         """
         Ajusta o filtro de data do Sitrax.
 
-        - Mesmo dia (início == fim): comportamento de antes — se o chip
-          já está nesse dia, NÃO mexe; só altera se precisar (1 dia no calendário).
-        - Dias diferentes: 1º clique na data escrita (11/07…) → popup →
-          Início/calendário dia1 → dia2 → Filtrar.
+        - Mesmo dia (início == fim): NÃO abre painel/calendário.
+          Só placa + Filtrar da barra (data do chip Sitrax fica como está).
+        - Dias diferentes: abre Filter Date → dia1 → dia2 → Filtrar popup.
         """
         data_ini = data_ini or date.today()
         data_fim = data_fim or data_ini
@@ -3146,26 +3145,31 @@ class SitraxBot:
 
         self._close_date_popup_if_open()
 
-        # Já está certo no chip → não clica em nada (mesmo dia ou período)
+        # Mesmo dia: não mexe no filtro de data (só multi-dia)
+        if data_ini == data_fim:
+            logger.info(
+                "Mesmo dia %s — sem abrir filtro de data (só multi-dia altera)",
+                ini_br,
+            )
+            self._trace(
+                "data_mesmo_dia_skip",
+                f"{ini_br} — não abre calendário; use placa+Filtrar barra",
+                shot=False,
+            )
+            return
+
+        # Já está certo no chip → não clica em nada
         if self._date_chip_matches(data_ini, data_fim):
             logger.info("Data já no chip: %s → %s (sem mexer)", ini_br, fim_br)
             self._trace("data_ja_ok", f"{ini_br} → {fim_br}", shot=False)
             return
 
-        multi_day = data_ini != data_fim
-        if multi_day:
-            logger.info(
-                "Período multi-dia %s → %s — 1º clique na data escrita",
-                ini_br,
-                fim_br,
-            )
-            self._set_date_filter_via_calendar(data_ini, data_fim, multi_day=True)
-        else:
-            logger.info(
-                "Mesmo dia %s — fluxo simples (só se chip diferente)",
-                ini_br,
-            )
-            self._set_date_filter_via_calendar(data_ini, data_fim, multi_day=False)
+        logger.info(
+            "Período multi-dia %s → %s — abre Filter Date",
+            ini_br,
+            fim_br,
+        )
+        self._set_date_filter_via_calendar(data_ini, data_fim, multi_day=True)
 
     def _set_date_filter_via_calendar(
         self,
@@ -4093,15 +4097,30 @@ class SitraxBot:
             except Exception as e:
                 logger.warning("re-select placa: %s", e)
 
-        self.set_date_filter(data_ini, data_fim)
+        # Data: só abre calendário se início ≠ fim
+        d_ini = data_ini or date.today()
+        d_fim = data_fim or d_ini
+        multi_day = d_ini != d_fim
+        if multi_day:
+            self.set_date_filter(d_ini, d_fim)
+        else:
+            self._close_date_popup_if_open()
+            logger.info(
+                "prepare_warm: mesmo dia %s — sem filtro de data",
+                d_ini.strftime("%d/%m/%Y"),
+            )
+            self._trace(
+                "prepare_mesmo_dia",
+                f"{d_ini.strftime('%d/%m/%Y')} — só placa + Filtrar (sem calendário)",
+                shot=False,
+            )
 
-        # Após popup de data o chip do veículo costuma sumir / grade zera.
-        # Ordem obrigatória: PLACA no chip → data ok → Filtrar da BARRA → espera.
+        # Ordem: PLACA no chip → (data multi se houver) → Filtrar da BARRA → espera.
         def _ensure_vehicle() -> bool:
             if self.wait_vehicle_chip(placa, timeout=3.5):
                 return True
             logger.warning(
-                "Chip %s ausente após data — re-seleciona SEM limpar data",
+                "Chip %s ausente — re-seleciona SEM limpar data",
                 placa,
             )
             try:
@@ -4169,13 +4188,10 @@ class SitraxBot:
                 shot=False,
             )
             chip_v = _ensure_vehicle()
-            # se data sumiu, reaplica (chip data)
+            # multi-dia: se data sumiu, reaplica; mesmo dia: não abre calendário
             try:
-                if not self._date_chip_matches(
-                    data_ini or date.today(),
-                    data_fim or data_ini or date.today(),
-                ):
-                    self.set_date_filter(data_ini, data_fim)
+                if multi_day and not self._date_chip_matches(d_ini, d_fim):
+                    self.set_date_filter(d_ini, d_fim)
                     chip_v = _ensure_vehicle()
             except Exception as e:
                 logger.warning("re-data após 0: %s", e)
