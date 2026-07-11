@@ -76,17 +76,6 @@ def extract_city(endereco: str, referencia: str = "") -> str:
     if not text or re.search(r"local\s+desconhecido", text, re.I):
         return "Local desconhecido"
 
-    # "Rua X - Paulista (... 349 Metros de PARATIBE" (truncado, sem UF)
-    m = re.search(
-        r"[-–]\s*([A-Za-zÀ-ú][A-Za-zÀ-ú\s]{2,40?}?)(?:\s*[\(\.]|\s+\d|\s*$)",
-        text,
-    )
-    if m:
-        cand = m.group(1).strip()
-        if cand and not re.search(r"\d{2}/\d{2}", cand) and len(cand) < 35:
-            # só aceita se parecer cidade conhecida ou nome simples
-            pass  # validado abaixo na lista; se não achar, tenta outros padrões
-
     # "Cidade (UF)" no fim ou no meio
     m = re.search(
         r"[-–,]?\s*([A-Za-zÀ-ú][A-Za-zÀ-ú\s]{1,40}?)\s*\(([A-Z]{2})\)\s*$",
@@ -106,17 +95,6 @@ def extract_city(endereco: str, referencia: str = "") -> str:
     m = re.search(r"\bde\s+([A-ZÁÉÍÓÚÃÕÂÊÔÇ][A-Za-zÀ-ú\s]{2,40})\b", referencia)
     if m:
         return m.group(1).strip().title()
-
-    # "Metros de PARATIBE" / "de PAULISTA" na referência
-    m = re.search(
-        r"(?:metros\s+de|de)\s+([A-ZÁÉÍÓÚÃÕÂÊÔÇ][A-Za-zÀ-ú\s]{2,40})",
-        text,
-        re.I,
-    )
-    if m:
-        cand = m.group(1).strip().title()
-        if cand.lower() not in ("paratibe",):  # bairro — tenta lista de cidades depois
-            pass
 
     # Cidades da Grande Recife / PE (mais longas primeiro)
     cities = [
@@ -457,14 +435,16 @@ def build_narrative_report(
     lines.append(header)
     lines.append("")
 
-    if not positions:
-        lines.append("Nenhum registro de posição encontrado no período.")
-        return "\n".join(lines)
-
     ordered = sorted(
         [p for p in positions if p.when],
         key=lambda p: p.when,  # type: ignore[arg-type, return-value]
     )
+    if not positions or not ordered:
+        # Caso real: Sitrax sem GPS no dia (não é falha do robô)
+        lines.append("ℹ️ Sem posições GPS no período (Sitrax: 0 registros).")
+        lines.append("")
+        lines.append("Total de pontos GPS: 0")
+        return "\n".join(lines)
     ligou, _ = find_ignition_events(ordered)
     desligues = find_all_desligou(ordered)
     segments = build_segments(ordered)

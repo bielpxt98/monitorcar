@@ -186,11 +186,16 @@ def _run_one_worker(
                     )
                     positions = positions_from_rows(rows)
                     n_pts = len([p for p in positions if p.when])
+                    # 0 pts com chip + mensagem Sitrax = dia sem GPS (válido)
+                    empty_legit = n_pts == 0 and (
+                        bot.sitrax_says_no_records()
+                        or bot.vehicle_chip_has_plate(pl)
+                    )
 
-                    if n_pts == 0:
-                        # 2ª chance completa (reabre Posições)
+                    if n_pts == 0 and not empty_legit:
+                        # só reabre se NÃO for zero legítimo do Sitrax
                         logger.warning(
-                            "Worker %s %s: 0 pts — reabre Posições e tenta de novo",
+                            "Worker %s %s: 0 pts suspeito — reabre Posições",
                             worker_id + 1,
                             pl,
                         )
@@ -207,6 +212,10 @@ def _run_one_worker(
                         )
                         positions = positions_from_rows(rows)
                         n_pts = len([p for p in positions if p.when])
+                        empty_legit = n_pts == 0 and (
+                            bot.sitrax_says_no_records()
+                            or bot.vehicle_chip_has_plate(pl)
+                        )
 
                     texto = build_narrative_report(
                         pl,
@@ -214,12 +223,14 @@ def _run_one_worker(
                         data_ref=data_ref,
                         cliente=v.get("cliente", ""),
                     )
-                    if n_pts == 0:
+                    if n_pts == 0 and empty_legit:
+                        # não tratar como erro — carro sem pontos no dia
+                        pass
+                    elif n_pts == 0:
                         texto = (
                             f"📋 {pl}: 0 posições após Filter "
                             f"(Chrome {worker_id+1}). "
-                            "Veículo pode não ter sido aplicado no filtro.\n\n"
-                            + texto
+                            "Falha ao aplicar filtro?\n\n" + texto
                         )
 
                     pdf_b = build_summary_pdf_bytes(
@@ -228,6 +239,8 @@ def _run_one_worker(
                         data_ref=data_ref,
                         cliente=v.get("cliente", ""),
                     )
+                    # ok=True mesmo com 0 pts se Sitrax confirmou vazio
+                    ok_result = n_pts > 0 or empty_legit
                     results.append(
                         PlateResult(
                             order=order,
@@ -236,14 +249,26 @@ def _run_one_worker(
                             pdf_bytes=pdf_b,
                             pontos=n_pts,
                             worker_id=worker_id,
-                            ok=n_pts > 0,
-                            error="" if n_pts > 0 else "0 posições",
+                            ok=ok_result,
+                            error="" if ok_result else "0 posições (não confirmado)",
                         )
                     )
+                    if n_pts > 0:
+                        step_name = f"w{worker_id+1}_ok_{pl}"
+                        step_msg = f"Chrome {worker_id+1}: {pl} → {n_pts} pts"
+                    elif empty_legit:
+                        step_name = f"w{worker_id+1}_vazio_ok_{pl}"
+                        step_msg = (
+                            f"Chrome {worker_id+1}: {pl} → 0 pts "
+                            "(Sitrax sem registros no período — OK)"
+                        )
+                    else:
+                        step_name = f"w{worker_id+1}_zero_{pl}"
+                        step_msg = f"Chrome {worker_id+1}: {pl} → 0 pts"
                     debug_session.step(
-                        f"w{worker_id+1}_ok_{pl}" if n_pts else f"w{worker_id+1}_zero_{pl}",
-                        f"Chrome {worker_id+1}: {pl} → {n_pts} pts",
-                        ok=n_pts > 0,
+                        step_name,
+                        step_msg,
+                        ok=ok_result,
                         screenshot=False,
                     )
                     with progress_lock:

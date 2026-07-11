@@ -2417,16 +2417,58 @@ class SitraxBot:
         except Exception:
             return False
 
+    def sitrax_says_no_records(self) -> bool:
+        """
+        True quando o Sitrax confirma busca sem dados (caso real, não bug).
+        Ex.: "Não foram encontrados registros" / "Showing: 0 Register(s)".
+        """
+        try:
+            return bool(
+                self._d().execute_script(
+                    """
+                    var body = ((document.body && document.body.innerText) || '');
+                    var b = body.toLowerCase();
+                    if (/n[aã]o\\s+foram\\s+encontrados\\s+registros/i.test(body)) return true;
+                    if (/no\\s+records?\\s+(were\\s+)?found/i.test(body)) return true;
+                    if (/nenhum\\s+registro/i.test(body)) return true;
+                    if (/mostrando\\s*:\\s*0\\s*registro/i.test(body)) return true;
+                    if (/showing\\s*:\\s*0\\s*register/i.test(body)) return true;
+                    // toast laranja do Sitrax
+                    var alerts = document.querySelectorAll(
+                      '.alert, .toast, [class*="alert"], [class*="warning"], [role="alert"]'
+                    );
+                    for (var i = 0; i < alerts.length; i++) {
+                      var t = (alerts[i].innerText || alerts[i].textContent || '');
+                      if (/n[aã]o\\s+foram\\s+encontrados|no\\s+records/i.test(t)) return true;
+                    }
+                    return false;
+                    """
+                )
+            )
+        except Exception:
+            return False
+
     def wait_positions_grid(self, timeout: float = 30) -> int:
         """
         Espera a grade de posições (PT/EN).
         Conta linhas com data GPS (não só tr vazios do DataTables).
+        Retorna 0 cedo se o Sitrax declarar explicitamente sem registros.
         """
         d = self._d()
         end = time.time() + timeout
         last_n = 0
+        empty_confirmed_since: Optional[float] = None
         while time.time() < end:
             try:
+                if self.sitrax_says_no_records():
+                    if empty_confirmed_since is None:
+                        empty_confirmed_since = time.time()
+                    # confirma 0 real após ~1.2s (toast + "Mostrando: 0")
+                    if time.time() - empty_confirmed_since >= 1.2:
+                        return 0
+                else:
+                    empty_confirmed_since = None
+
                 n = d.execute_script(
                     """
                     var body = (document.body && document.body.innerText) || '';
@@ -2436,7 +2478,6 @@ class SitraxBot:
                          || body.match(/(\\d+)\\s*Record/i);
                     if (m && parseInt(m[1], 10) > 0) return parseInt(m[1], 10);
 
-                    // conta linhas com data dd/mm/yyyy hh:mm (scrollBody ou qualquer table)
                     var DATE_RE = /\\d{2}\\/\\d{2}\\/\\d{4}\\s+\\d{2}:\\d{2}/;
                     var trs = document.querySelectorAll(
                       '.dataTables_scrollBody tbody tr, table tbody tr, table tr'
@@ -2452,14 +2493,6 @@ class SitraxBot:
                 last_n = int(n or 0)
                 if last_n > 0:
                     return last_n
-                if re.search(
-                    r"mostrando\s*:\s*0|showing\s*:\s*0|0\s*registro|0\s*record",
-                    (d.find_element(By.TAG_NAME, "body").text or ""),
-                    re.I,
-                ):
-                    # só aceita zero explícito depois de ~4s de espera
-                    if time.time() + timeout - end > 4:
-                        return 0
             except Exception:
                 pass
             self._sleep(0.45)
@@ -2474,16 +2507,16 @@ class SitraxBot:
     ) -> list:
         """
         Fluxo robusto 1 placa na frota:
-          limpa chip se preciso → escolhe placa → Filter → espera grade → scrape.
-        Até 3 tentativas se voltar 0 linhas (problema típico da frota).
-        """
-        from app.bot.report import positions_from_rows
+          limpa chip → escolhe placa → Filter → espera grade → scrape.
 
+        0 posições pode ser:
+          - REAL: Sitrax "não foram encontrados registros" → aceita na 1ª confirmação
+          - BUG: chip/filter errado → tenta de novo (até 3x)
+        """
         placa_u = self._norm_placa(placa)
         last_rows: list = []
         for attempt in range(3):
             try:
-                # tentativa 0: clear se pedido; tentativas seguintes sempre limpam
                 self.prepare_historico_warm(
                     placa_u,
                     data_ini,
@@ -2502,7 +2535,6 @@ class SitraxBot:
                         pass
                 continue
 
-            # modal fechado?
             try:
                 self._d().execute_script(
                     "if (typeof hideModalSearchVeiculo === 'function') "
@@ -2527,24 +2559,29 @@ class SitraxBot:
                 self.clear_vehicle_chip()
                 continue
 
-            # garante Filter de novo (às vezes o 1º click some com modal)
             try:
                 self.click_filtrar()
             except Exception as e:
                 logger.warning("re-Filter %s: %s", placa_u, e)
 
-            n_hint = self.wait_positions_grid(timeout=28)
+            n_hint = self.wait_positions_grid(timeout=22)
             self.try_scroll_all()
             rows = self.scrape_positions_table()
             last_rows = rows or []
             n_scrape = len(last_rows)
+            empty_ok = self.sitrax_says_no_records() or (
+                n_hint == 0 and self.vehicle_chip_has_plate(placa_u)
+            )
+
             logger.info(
-                "Frota %s tentativa %s: grid~%s scrape=%s",
+                "Frota %s tentativa %s: grid~%s scrape=%s empty_ok=%s",
                 placa_u,
                 attempt + 1,
                 n_hint,
                 n_scrape,
+                empty_ok,
             )
+
             if n_scrape > 0:
                 self._trace(
                     f"frota_rows_{placa_u}",
@@ -2553,21 +2590,41 @@ class SitraxBot:
                 )
                 return last_rows
 
-            # 0 linhas: tenta Filter + espera de novo
+            # Sitrax confirmou: sem registros no período → resultado válido
+            if empty_ok and self.vehicle_chip_has_plate(placa_u):
+                self._trace(
+                    f"frota_sem_dados_{placa_u}",
+                    f"{placa_u}: Sitrax sem registros no período (0 pts — OK)",
+                    ok=True,
+                    shot=True,
+                )
+                return []
+
+            # 0 sem confirmação: tenta Filter de novo
             try:
                 self.click_filtrar()
-                self.wait_positions_grid(timeout=15)
+                self.wait_positions_grid(timeout=12)
                 self.try_scroll_all()
                 rows = self.scrape_positions_table()
                 last_rows = rows or []
                 if last_rows:
                     return last_rows
+                if self.sitrax_says_no_records() and self.vehicle_chip_has_plate(
+                    placa_u
+                ):
+                    self._trace(
+                        f"frota_sem_dados_{placa_u}",
+                        f"{placa_u}: 0 registros confirmados pelo Sitrax",
+                        ok=True,
+                    )
+                    return []
             except Exception:
                 pass
 
             self._save_debug(
                 f"frota_zero_{placa_u}_t{attempt+1}",
-                f"0 posições para {placa_u} tentativa {attempt+1}",
+                f"0 posições para {placa_u} tentativa {attempt+1} "
+                f"(empty_ok={empty_ok})",
                 ok=False,
             )
 
