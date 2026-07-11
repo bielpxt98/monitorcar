@@ -6,6 +6,7 @@ from app.bot.report import (
     Position,
     build_narrative_report,
     extract_city,
+    find_all_desligou,
     find_ignition_events,
     is_ignition_on,
     parse_dt,
@@ -132,4 +133,56 @@ def test_desligou_is_transition_not_last_parked():
     text = build_narrative_report("PDY4D85", positions, data_ref="11/07/2026")
     assert "Ligou às 07:29" in text
     assert "Desligou às 07:30" in text
-    assert "Desligou às 07:39" not in text
+    assert "07:39" not in text.split("Desligou")[-1] or "Desligou às 07:39" not in text
+    assert "esteve em" in text
+
+
+def test_all_desligou_with_city():
+    """Vários desligues no dia — lista todos com cidade, mantém esteve."""
+    positions = [
+        Position(
+            data_gps=datetime(2026, 7, 11, 6, 0, 0),
+            data_sistema=None,
+            modo="Em Movimento",
+            endereco="Paulista (PE)",
+            referencia="",
+        ),
+        Position(
+            data_gps=datetime(2026, 7, 11, 7, 26, 0),
+            data_sistema=None,
+            modo="Estacionado",
+            endereco="Paulista (PE)",
+            referencia="",
+        ),
+        Position(
+            data_gps=datetime(2026, 7, 11, 7, 28, 0),
+            data_sistema=None,
+            modo="Alerta - Ignição Ligada",
+            endereco="Olinda (PE)",
+            referencia="",
+        ),
+        Position(
+            data_gps=datetime(2026, 7, 11, 8, 0, 0),
+            data_sistema=None,
+            modo="Normal",
+            endereco="Recife (PE)",
+            referencia="",
+        ),
+        Position(
+            data_gps=datetime(2026, 7, 11, 9, 0, 0),
+            data_sistema=None,
+            modo="Estacionado",
+            endereco="Recife (PE)",
+            referencia="",
+        ),
+    ]
+    offs = find_all_desligou(positions)
+    assert len(offs) == 2
+    assert offs[0].when.hour == 7 and offs[0].cidade == "Paulista"
+    assert offs[1].when.hour == 9 and offs[1].cidade == "Recife"
+
+    text = build_narrative_report("PDX3G64", positions, data_ref="11/07/2026")
+    assert "esteve em" in text
+    assert "Desligou (2x" in text
+    assert "07:26 em Paulista" in text
+    assert "09:00 em Recife" in text

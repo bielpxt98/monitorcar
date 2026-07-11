@@ -26,6 +26,7 @@ from reportlab.platypus import (
 from app.bot.report import (
     Position,
     build_segments,
+    find_all_desligou,
     find_ignition_events,
     format_time,
 )
@@ -207,7 +208,8 @@ def build_summary_pdf_bytes(
 
     ordered = sorted([p for p in positions if p.when], key=lambda p: p.when)  # type: ignore
     segments = build_segments(ordered)
-    ligou, desligou = find_ignition_events(ordered)
+    ligou, _ = find_ignition_events(ordered)
+    desligues = find_all_desligou(ordered)
 
     story = []
     story.append(Paragraph(titulo, title_style))
@@ -219,15 +221,11 @@ def build_summary_pdf_bytes(
     story.append(Paragraph(" &nbsp;|&nbsp; ".join(header_bits), sub_style))
     story.append(Spacer(1, 4 * mm))
 
-    ign_lines = []
     if ligou:
-        ign_lines.append(f"Ligou às <b>{format_time(ligou)}</b>")
-    if desligou:
-        city_off = segments[-1].cidade if segments else "—"
-        ign_lines.append(f"Desligou às <b>{format_time(desligou)}</b> em {city_off}")
-    if ign_lines:
-        story.append(Paragraph(" &nbsp;·&nbsp; ".join(ign_lines), body_style))
-        story.append(Spacer(1, 6 * mm))
+        story.append(
+            Paragraph(f"Ligou às <b>{format_time(ligou)}</b>", body_style)
+        )
+        story.append(Spacer(1, 4 * mm))
 
     if not segments:
         story.append(
@@ -274,6 +272,39 @@ def build_summary_pdf_bytes(
             )
         )
         story.append(table)
+
+    # Desligou: todos os eventos, cidade no momento do desligue
+    if desligues:
+        story.append(Spacer(1, 6 * mm))
+        story.append(Paragraph("<b>Desligou</b>", body_style))
+        story.append(Spacer(1, 2 * mm))
+        off_data = [["Hora", "Cidade"]]
+        for d in desligues:
+            off_data.append([format_time(d.when), d.cidade])
+        off_table = Table(off_data, colWidths=[3 * cm, 12.4 * cm])
+        off_table.setStyle(
+            TableStyle(
+                [
+                    ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#374151")),
+                    ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+                    ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+                    ("FONTSIZE", (0, 0), (-1, -1), 10),
+                    ("ALIGN", (0, 0), (0, -1), "CENTER"),
+                    ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+                    ("GRID", (0, 0), (-1, -1), 0.4, colors.HexColor("#e5e7eb")),
+                    (
+                        "ROWBACKGROUNDS",
+                        (0, 1),
+                        (-1, -1),
+                        [colors.white, colors.HexColor("#f3f4f6")],
+                    ),
+                    ("TOPPADDING", (0, 0), (-1, -1), 6),
+                    ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
+                    ("LEFTPADDING", (0, 0), (-1, -1), 8),
+                ]
+            )
+        )
+        story.append(off_table)
 
     story.append(Spacer(1, 10 * mm))
     story.append(

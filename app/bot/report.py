@@ -299,24 +299,80 @@ def build_segments(
     return final
 
 
+@dataclass
+class DesligouEvent:
+    """Um desligue real (transição ON → OFF) com a cidade naquele momento."""
+
+    when: datetime
+    cidade: str
+
+
+def city_at_time(positions: list[Position], when: datetime) -> str:
+    """Cidade do ponto GPS na hora do evento (ou o mais próximo anterior)."""
+    ordered = sorted(
+        [p for p in positions if p.when],
+        key=lambda p: p.when,  # type: ignore[arg-type, return-value]
+    )
+    best = "local desconhecido"
+    for pos in ordered:
+        if pos.when is None:
+            continue
+        if pos.when <= when:
+            c = _normalize_city(pos.cidade)
+            if c and c.lower() != "local desconhecido":
+                best = c
+            elif best == "local desconhecido":
+                best = c or best
+        else:
+            break
+    if "jaboat" in best.lower():
+        best = "Jaboatão dos Guararapes"
+    return best
+
+
+def find_all_desligou(positions: list[Position]) -> list[DesligouEvent]:
+    """
+    Todos os desligues do dia: cada transição ON → OFF.
+    Cidade = onde estava no ponto do desligue (não a última cidade do dia).
+    """
+    ordered = sorted(
+        [p for p in positions if p.when],
+        key=lambda p: p.when,  # type: ignore[arg-type, return-value]
+    )
+    events: list[DesligouEvent] = []
+    prev_on: Optional[bool] = None
+
+    for pos in ordered:
+        state = is_ignition_on(pos.modo)
+        if state is None:
+            continue
+        if state is True:
+            prev_on = True
+        elif state is False:
+            if prev_on is True and pos.when is not None:
+                cidade = _normalize_city(pos.cidade)
+                if "jaboat" in cidade.lower():
+                    cidade = "Jaboatão dos Guararapes"
+                if not cidade or cidade.lower() == "local desconhecido":
+                    cidade = city_at_time(ordered, pos.when)
+                events.append(DesligouEvent(when=pos.when, cidade=cidade))
+            prev_on = False
+    return events
+
+
 def find_ignition_events(
     positions: list[Position],
 ) -> tuple[Optional[datetime], Optional[datetime]]:
     """
-    Ligou  = primeiro ponto com ignição ON (movimento / ignição ligada).
-    Desligou = momento da transição ON → OFF (primeiro Estacionado/desligada
-               depois de ter ligado) — NÃO o último registro do dia.
-
-    Antes o código sobrescrevia Desligou com o último ponto estacionado
-    (ex.: 07:39), colando no fim da lista em vez da hora real do desligue.
+    Compat: primeiro ligou + último desligue (lista completa em find_all_desligou).
     """
     ordered = sorted(
         [p for p in positions if p.when],
         key=lambda p: p.when,  # type: ignore[arg-type, return-value]
     )
     ligou: Optional[datetime] = None
-    desligou: Optional[datetime] = None
     prev_on: Optional[bool] = None
+    desligou: Optional[datetime] = None
 
     for pos in ordered:
         state = is_ignition_on(pos.modo)
@@ -327,15 +383,10 @@ def find_ignition_events(
                 ligou = pos.when
             prev_on = True
         elif state is False:
-            # só conta desligue se já esteve ligado (evita "desligou" no 1º parked)
-            if prev_on is True and desligou is None:
-                desligou = pos.when
-            # se religar e desligar de novo no mesmo dia, guarda o ÚLTIMO desligue real
-            elif prev_on is True:
+            if prev_on is True:
                 desligou = pos.when
             prev_on = False
 
-    # NÃO usar o último registro do dia como desligou — isso colava no fim da lista
     return ligou, desligou
 
 
@@ -346,12 +397,13 @@ def build_narrative_report(
     cliente: str = "",
 ) -> str:
     """
-    Exemplo de saída:
-    Veículo PCE7B03 (10/07/2026)
+    Exemplo:
     - Ligou às 06:01
     - de 06:01 às 12:00 esteve em Abreu e Lima
     - de 12:00 às 14:00 esteve em Paulista
-    - de 20:00 em Paulista e desligou
+    - Desligou:
+        • 07:26 em Paulista
+        • 12:40 em Recife
     """
     lines: list[str] = []
     header = f"📋 Relatório — placa {placa.upper()}"
@@ -370,7 +422,8 @@ def build_narrative_report(
         [p for p in positions if p.when],
         key=lambda p: p.when,  # type: ignore[arg-type, return-value]
     )
-    ligou, desligou = find_ignition_events(ordered)
+    ligou, _ = find_ignition_events(ordered)
+    desligues = find_all_desligou(ordered)
     segments = build_segments(ordered)
 
     if ligou:
@@ -383,22 +436,31 @@ def build_narrative_report(
                 f"(modo: {ordered[0].modo or 'n/d'})"
             )
 
+    # Esteve em… (inalterado — resumo por cidade)
     lines.append("")
     lines.append("📍 Resumo por cidade / horário:")
-    for i, seg in enumerate(segments):
+    for seg in segments:
         lines.append(
             f"   • {format_range(seg.inicio, seg.fim)} esteve em {seg.cidade}"
         )
 
-    if desligou:
-        # cidade no horário do desligamento
-        city_off = segments[-1].cidade if segments else "local desconhecido"
-        lines.append("")
-        lines.append(f"🔒 Desligou às {format_time(desligou)} em {city_off}")
+    # Só a parte de desligou: TODOS os desligues + cidade na hora
+    lines.append("")
+    if desligues:
+        if len(desligues) == 1:
+            d = desligues[0]
+            lines.append(
+                f"🔒 Desligou às {format_time(d.when)} em {d.cidade}"
+            )
+        else:
+            lines.append(f"🔒 Desligou ({len(desligues)}x no período):")
+            for d in desligues:
+                lines.append(
+                    f"   • {format_time(d.when)} em {d.cidade}"
+                )
     elif ordered:
         last = ordered[-1]
         if last.when:
-            lines.append("")
             lines.append(
                 f"ℹ️ Último registro: {format_time(last.when)} — "
                 f"{last.cidade} ({last.modo or 'n/d'})"
