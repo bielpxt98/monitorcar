@@ -2324,7 +2324,7 @@ class SitraxBot:
                       var t = norm(el.innerText||'');
                       if (t.length < 10 || t.length > 600) continue;
                       var title = /Filtro\\s*Data|Date\\s*Filter|Filter\\s*Date|Filtro\\s*data/i.test(t);
-                      var ini = /In[ií]cio\\s*:|Start\\s*:|From\\s*:/i.test(t);
+                      var ini = /In[ií]cio\\s*:|Start\\s*:|From\\s*:|Home\\s*:/i.test(t);
                       var fim = /\\bFim\\s*:|\\bEnd\\s*:|Until\\s*:/i.test(t);
                       var btn = /\\bFiltrar\\b|\\bFilter\\b|\\bFechar\\b|\\bClose\\b|\\bApply\\b|\\bAplicar\\b/i.test(t);
                       if (title && (ini || btn)) return true;
@@ -2368,14 +2368,14 @@ class SitraxBot:
                     ctx += ' ' + norm(p.innerText||'').slice(0,150);
                     p = p.parentElement;
                   }
-                  if (!/Filtro\\s*Data|Date\\s*Filter|In[ií]cio|Start\\s*:/i.test(ctx)) continue;
+                  if (!/Filtro\\s*Data|Date\\s*Filter|Filter\\s*Date|In[ií]cio|Start\\s*:|Home\\s*:|End\\s*:/i.test(ctx)) continue;
                   // botão pequeno do popup (barra tem botão maior com ícone)
                   if (r.width > 220) continue;
                   best = el;
                   break;
                 }
                 if (!best){
-                  // 2º: qualquer Filtrar perto de Início/Fim
+                  // 2º: qualquer Filtrar perto de Home/End / Início/Fim
                   for (var i=0;i<nodes.length;i++){
                     var el = nodes[i];
                     var t = norm(el.innerText || el.value || '');
@@ -2385,7 +2385,7 @@ class SitraxBot:
                       ctx += ' ' + norm(p.innerText||'').slice(0,120);
                       p = p.parentElement;
                     }
-                    if (/In[ií]cio|Filtro\\s*Data|Date\\s*Filter/i.test(ctx)){
+                    if (/In[ií]cio|Home\\s*:|End\\s*:|Filtro\\s*Data|Date\\s*Filter|Filter\\s*Date/i.test(ctx)){
                       best = el; break;
                     }
                   }
@@ -2404,108 +2404,154 @@ class SitraxBot:
 
     def _click_popup_purple_date(self, which: str = "ini") -> bool:
         """
-        No popup Filtro Data, clica a data ROXA:
-          which='ini' → Início: 10/07/2026 00:00:00
-          which='fim' → Fim:    10/07/2026 23:59:59
+        No popup Filter Date / Filtro Data, clica a data ROXA escrita
+        para abrir o calendário:
+          EN: Home:/From:/Start:  11/07/2026 00:00:00
+              End:                 11/07/2026 23:59:59
+          PT: Início: / Fim:
         """
         d = self._d()
-        want_ini = which.lower() in ("ini", "inicio", "início", "start", "first", "1")
+        want_ini = which.lower() in (
+            "ini",
+            "inicio",
+            "início",
+            "start",
+            "from",
+            "home",
+            "first",
+            "1",
+        )
         try:
-            clicked = d.execute_script(
+            # 1) localiza coordenadas da data roxa no popup e clica com CDP
+            loc = d.execute_script(
                 self._js_is_purple()
                 + """
                 var wantIni = arguments[0];
-                var nodes = document.querySelectorAll('span,a,div,td,label,p,b,strong,em,input,font');
-                var targets = [];
+                // achar o painel Filter Date / Filtro Data
+                var popup = null, bestLen = 1e9;
+                var all = document.querySelectorAll('div,section,form,aside,ul,table');
+                for (var i=0;i<all.length;i++){
+                  var el = all[i];
+                  var r = el.getBoundingClientRect();
+                  if (r.width < 100 || r.height < 50 || r.width > 500) continue;
+                  if (r.top < 40 || r.top > 520) continue;
+                  var t = norm(el.innerText||'');
+                  if (t.length < 20 || t.length > 400) continue;
+                  var isPop = /Filter\\s*Date|Date\\s*Filter|Filtro\\s*Data/i.test(t)
+                    && /(In[ií]cio|Home|Start|From|Fim|End)/i.test(t)
+                    && /(Close|Fechar|Filter|Filtrar)/i.test(t);
+                  if (!isPop) continue;
+                  if (t.length < bestLen){ bestLen = t.length; popup = el; }
+                }
+                if (!popup) {
+                  // fallback: qualquer bloco com Home/End ou Início/Fim + data
+                  for (var i=0;i<all.length;i++){
+                    var el = all[i];
+                    var r = el.getBoundingClientRect();
+                    if (r.width < 100 || r.height < 50 || r.width > 450) continue;
+                    var t = norm(el.innerText||'');
+                    if (/Home\\s*:|In[ií]cio\\s*:|Start\\s*:/i.test(t)
+                        && /End\\s*:|Fim\\s*:/i.test(t)
+                        && /\\d{2}\\/\\d{2}\\/\\d{4}/.test(t)
+                        && t.length < 300) {
+                      popup = el; break;
+                    }
+                  }
+                }
+                if (!popup) return {ok:false, reason:'no_popup'};
+
+                var nodes = popup.querySelectorAll('span,a,div,td,label,p,b,strong,em,input,font,u');
+                var rows = [];
                 for (var i=0;i<nodes.length;i++){
                   var el = nodes[i];
-                  var t = norm(el.innerText || el.value || el.textContent || '');
-                  if (!t || t.length > 90) continue;
+                  var t = norm(el.innerText || el.value || '');
+                  if (!t || t.length > 70) continue;
                   if (!/\\d{2}\\/\\d{2}\\/\\d{4}/.test(t)) continue;
-                  // evita chip da barra
-                  if (/\\bDate\\s*:|\\bData\\s*:/i.test(t) && /Until|At[eé]/i.test(t)) continue;
-                  if (/Ve[ií]culo|Vehicle|Filtros|Filters|Mostrando|Showing/i.test(t)) continue;
-
-                  var hasIni = /In[ií]cio|Start/i.test(t);
-                  var hasFim = /(^|\\s)Fim\\s*:|(^|\\s)End\\s*:|Until/i.test(t)
-                    && !hasIni;
-                  // só a data roxa (sem label) — conta como candidato
+                  if (/Filter\\s*Date|Date\\s*Filter|Filtro\\s*Data|Close|Fechar/i.test(t) && t.length > 30) continue;
+                  var hasIni = /In[ií]cio|Start|From|Home/i.test(t);
+                  var hasFim = /(^|\\b)(Fim|End)\\s*:/i.test(t);
                   var onlyDate = /^\\d{2}\\/\\d{2}\\/\\d{4}(\\s+\\d{2}:\\d{2}(:\\d{2})?)?$/.test(t);
                   var purple = isPurple(el);
-
-                  if (wantIni){
-                    if (!(hasIni || (onlyDate && purple) || (onlyDate && !hasFim))) continue;
-                    if (hasFim && !hasIni) continue;
-                  } else {
-                    if (!(hasFim || (onlyDate && purple))) continue;
-                    if (hasIni && !hasFim) continue;
-                  }
-
                   var r = el.getBoundingClientRect();
-                  if (r.width < 6 || r.height < 5) continue;
-                  if (r.top < 50 || r.top > 520) continue;
-
-                  // contexto: deve estar no popup Filtro Data se possível
-                  var p = el, ctx = '';
-                  for (var k=0;k<6 && p;k++){
-                    ctx += ' ' + norm(p.innerText||'').slice(0,100);
-                    p = p.parentElement;
-                  }
-                  var inPopup = /Filtro\\s*Data|Date\\s*Filter|In[ií]cio|Fechar|Close/i.test(ctx);
-                  var score = t.length
-                    + (purple ? -50 : 0)
-                    + (inPopup ? -40 : 20)
-                    + (wantIni ? (hasIni ? -30 : 0) : (hasFim ? -30 : 0))
-                    + r.top * 0.01;
-                  // onlyDate roxo: se wantIni pega o de cima (menor top), se fim o de baixo
-                  if (onlyDate) score += wantIni ? r.top * 0.02 : -r.top * 0.02;
-                  targets.push({el:el, t:t, score:score, purple:purple});
+                  if (r.width < 8 || r.height < 5) continue;
+                  rows.push({el:el, t:t, hasIni:hasIni, hasFim:hasFim, onlyDate:onlyDate,
+                             purple:purple, top:r.top, left:r.left, w:r.width, h:r.height});
                 }
-                targets.sort(function(a,b){ return a.score - b.score; });
-                if (!targets.length) return {ok:false, which: wantIni ? 'ini' : 'fim'};
+                // ordena por top (Home em cima, End embaixo)
+                rows.sort(function(a,b){ return a.top - b.top || a.left - b.left; });
 
-                var c = targets[0];
-                var clickEl = c.el;
-                // preferir filho roxo só com a data
-                var kids = c.el.querySelectorAll('span,a,b,em,div,font,input');
+                var pick = null;
+                // 1) linha com label Home/Início ou End/Fim
+                for (var i=0;i<rows.length;i++){
+                  if (wantIni && rows[i].hasIni && !rows[i].hasFim) { pick = rows[i]; break; }
+                  if (!wantIni && rows[i].hasFim) { pick = rows[i]; break; }
+                }
+                // 2) só datas roxas: 1ª = ini, 2ª = fim
+                if (!pick){
+                  var dates = rows.filter(function(x){
+                    return x.onlyDate || (x.purple && /\\d{2}\\/\\d{2}/.test(x.t));
+                  });
+                  // dedupe por top aproximado
+                  var uniq = [];
+                  dates.forEach(function(d){
+                    if (!uniq.some(function(u){ return Math.abs(u.top - d.top) < 8; }))
+                      uniq.push(d);
+                  });
+                  if (uniq.length >= 1)
+                    pick = wantIni ? uniq[0] : uniq[Math.min(1, uniq.length-1)];
+                }
+                if (!pick && rows.length){
+                  pick = wantIni ? rows[0] : rows[rows.length-1];
+                }
+                if (!pick) return {ok:false, reason:'no_date_row', n: rows.length};
+
+                // preferir filho só com a data
+                var clickEl = pick.el;
+                var kids = pick.el.querySelectorAll('span,a,b,em,div,font,input,u');
                 for (var j=0;j<kids.length;j++){
                   var kt = norm(kids[j].innerText || kids[j].value || '');
-                  if (/^\\d{2}\\/\\d{2}\\/\\d{4}/.test(kt) && kt.length < 28 && isPurple(kids[j])){
+                  if (/^\\d{2}\\/\\d{2}\\/\\d{4}/.test(kt) && kt.length < 28){
                     clickEl = kids[j];
                     break;
                   }
                 }
-                // se onlyDate e temos 2 roxos, pega 1º ou 2º
-                if (targets.length >= 2 && /^\\d{2}\\/\\d{2}/.test(c.t)){
-                  var purples = targets.filter(function(x){ return x.purple || /^\\d{2}\\/\\d{2}/.test(x.t); });
-                  purples.sort(function(a,b){
-                    return a.el.getBoundingClientRect().top - b.el.getBoundingClientRect().top;
-                  });
-                  if (purples.length >= 2){
-                    clickEl = wantIni ? purples[0].el : purples[purples.length-1].el;
-                  }
-                }
+                var r = clickEl.getBoundingClientRect();
                 forceClick(clickEl);
-                return {ok:true, t: norm(clickEl.innerText||clickEl.value||c.t), which: wantIni?'ini':'fim'};
+                return {
+                  ok: true,
+                  t: norm(clickEl.innerText||clickEl.value||pick.t),
+                  which: wantIni ? 'ini' : 'fim',
+                  clickX: r.left + r.width * 0.45,
+                  clickY: r.top + r.height / 2,
+                  purple: isPurple(clickEl)
+                };
                 """,
                 want_ini,
             )
-            if clicked and clicked.get("ok"):
+            if loc and loc.get("ok"):
                 logger.info(
-                    "Clicou data popup %s: %s",
-                    clicked.get("which"),
-                    clicked.get("t"),
+                    "Clicou data popup %s: %s @ (%.0f,%.0f)",
+                    loc.get("which"),
+                    loc.get("t"),
+                    loc.get("clickX") or 0,
+                    loc.get("clickY") or 0,
                 )
+                # reforço CDP no mesmo ponto (abre calendário)
+                cx, cy = loc.get("clickX"), loc.get("clickY")
+                if cx and cy:
+                    self._cdp_click_xy(cx, cy)
+                    self._sleep(0.25)
+                    self._cdp_click_xy(cx, cy)  # 2º clique se o 1º só focou
                 return True
-            logger.warning("Popup purple date %s: %s", which, clicked)
+            logger.warning("Popup purple date %s: %s", which, loc)
         except Exception as e:
             logger.warning("click popup purple %s: %s", which, e)
 
-        # Selenium
+        # Selenium: Home / From / Start / Início  |  End / Fim
         labels = (
-            ("Início", "Inicio", "Start")
+            ("Home", "From", "Start", "Início", "Inicio")
             if want_ini
-            else ("Fim", "End")
+            else ("End", "Fim")
         )
         for lab in labels:
             for el in d.find_elements(
@@ -2516,15 +2562,25 @@ class SitraxBot:
                     t = re.sub(r"\s+", " ", (el.text or "").strip())
                     if len(t) > 90 or not re.search(r"\d{2}/\d{2}/\d{4}", t):
                         continue
-                    if "Date:" in t and "Until" in t:
+                    if re.search(r"\bDate\s*:.*Until", t, re.I):
                         continue
-                    if el.is_displayed():
-                        try:
-                            ActionChains(d).move_to_element(el).pause(0.1).click().perform()
-                        except Exception:
-                            self._click(el)
-                        logger.info("Clicou popup %s selenium: %s", which, t[:50])
-                        return True
+                    if not el.is_displayed():
+                        continue
+                    # clica na data (filho ou offset)
+                    target = el
+                    for child in el.find_elements(By.CSS_SELECTOR, "span,a,b,em,div"):
+                        ct = (child.text or "").strip()
+                        if re.match(r"^\d{2}/\d{2}/\d{4}", ct) and len(ct) < 30:
+                            target = child
+                            break
+                    try:
+                        ActionChains(d).move_to_element(target).pause(0.1).click().pause(
+                            0.15
+                        ).click().perform()
+                    except Exception:
+                        self._click(target)
+                    logger.info("Clicou popup %s selenium: %s", which, t[:50])
+                    return True
                 except Exception:
                     continue
         return False
@@ -2950,36 +3006,77 @@ class SitraxBot:
                 )
                 continue
 
-            logger.info("Popup Filtro Data ABERTO (tentativa %s)", attempt)
+            logger.info("Popup Filter Date ABERTO (tentativa %s)", attempt)
             self._save_debug(f"data_popup_ok_{attempt}")
 
-            # 2) clica data Início roxa no popup
-            ok_ini = self._click_popup_purple_date("ini")
-            logger.info("Clique Início no popup: %s", ok_ini)
-            self._sleep(0.55)
-
-            for _ in range(14):
-                if self._calendar_visible():
+            # 2) clica de novo na data escrita do popup (Home/Início roxo)
+            #    → abre o 2º popup (calendário)
+            cal_open = False
+            for open_try in range(4):
+                ok_ini = self._click_popup_purple_date("ini")
+                logger.info(
+                    "Clique data Home/Início no popup (try %s): %s",
+                    open_try + 1,
+                    ok_ini,
+                )
+                self._sleep(0.55)
+                for _ in range(8):
+                    if self._calendar_visible():
+                        cal_open = True
+                        break
+                    self._sleep(0.2)
+                if cal_open:
                     break
-                if _ in (3, 7):
-                    self._click_popup_purple_date("ini")
-                self._sleep(0.25)
+                # tenta clicar qualquer data roxa DD/MM dentro do Filter Date
+                try:
+                    d.execute_script(
+                        self._js_is_purple()
+                        + """
+                        var nodes = document.querySelectorAll('span,a,div,b,em,font,input');
+                        for (var i=0;i<nodes.length;i++){
+                          var t = norm(nodes[i].innerText||nodes[i].value||'');
+                          if (!/^\\d{2}\\/\\d{2}\\/\\d{4}/.test(t) || t.length > 28) continue;
+                          var p = nodes[i], ctx='';
+                          for (var k=0;k<6 && p;k++){
+                            ctx += ' ' + norm(p.innerText||'').slice(0,80);
+                            p = p.parentElement;
+                          }
+                          if (!/Filter\\s*Date|Date\\s*Filter|Filtro\\s*Data|Home\\s*:|In[ií]cio/i.test(ctx))
+                            continue;
+                          forceClick(nodes[i]);
+                          return t;
+                        }
+                        return null;
+                        """
+                    )
+                except Exception:
+                    pass
+                self._sleep(0.4)
+
             self._save_debug(f"data_calendario_{attempt}")
 
-            # 3) seleciona dias no calendário
-            if self._calendar_visible():
+            # 3) no calendário: escolhe 1º dia e 2º dia
+            if self._calendar_visible() or cal_open:
+                self._sleep(0.3)
                 ok_cal = self._select_range_on_calendar(
                     data_ini, data_fim if multi_day else data_ini
                 )
                 logger.info(
-                    "Calendário %s→%s: %s",
+                    "Calendário escolheu %s→%s: %s",
                     ini_br,
                     fim_br if multi_day else ini_br,
                     ok_cal,
                 )
-                self._sleep(0.45)
+                self._sleep(0.5)
+                # se multi-dia e calendário ainda aberto, garante 2º clique
+                if multi_day and self._calendar_visible():
+                    self._select_range_on_calendar(data_ini, data_fim)
+                    self._sleep(0.3)
             else:
-                logger.warning("Calendário não abriu — tenta inputs / Fim")
+                logger.warning(
+                    "Calendário NÃO abriu após clicar data do popup (tentativa %s)",
+                    attempt,
+                )
                 self._click_popup_purple_date("fim")
                 self._sleep(0.4)
                 if self._calendar_visible():
