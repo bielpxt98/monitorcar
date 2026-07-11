@@ -1,19 +1,18 @@
 """
-Frota com N Chromes permanentes (padrão 3) e divisão round-robin.
+Frota com 2 Chromes (permanentes do WarmPool) e divisão round-robin.
 
 Placas 1-indexadas:
-  Worker 1 → 1, 4, 7, 10, 13...
-  Worker 2 → 2, 5, 8, 11, 14...
-  Worker 3 → 3, 6, 9, 12, 15...
+  Worker 1 → 1, 3, 5, 7, 9...
+  Worker 2 → 2, 4, 6, 8, 10...
 
-Cada worker: login 1x, fica em Posições; entre placas faz X do chip → próxima.
+Preferência: reutilizar bots já logados em Veículos (keep_alive=True).
 """
 
 from __future__ import annotations
 
 import logging
 import threading
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import date
 from pathlib import Path
@@ -21,14 +20,14 @@ from typing import Any, Optional
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_WORKERS = 3
+DEFAULT_WORKERS = 2
 
 
 def partition_round_robin(
     vehicles: list[dict], n_workers: int = DEFAULT_WORKERS
 ) -> list[list[tuple[int, dict]]]:
     """
-    Divide a lista: índice 0 → W0, 1 → W1, 2 → W2, 3 → W0...
+    Divide a lista: índice 0 → W0, 1 → W1, 2 → W0...
     Retorna lista de buckets; cada item é (ordem_original, vehicle_dict).
     """
     n = max(1, int(n_workers))
@@ -87,8 +86,11 @@ def _run_one_worker(
     download_dir: Path,
     progress: dict,
     progress_lock: threading.Lock,
+    existing_bot: Any = None,
+    keep_alive: bool = False,
+    on_bot_replaced: Optional[Any] = None,
 ) -> list[PlateResult]:
-    """Um Chrome permanente processa sua fatia round-robin."""
+    """Um Chrome processa sua fatia; preferência: bot permanente (keep_alive)."""
     import time as _time
 
     from app.bot.sitrax import SitraxBot
@@ -102,10 +104,11 @@ def _run_one_worker(
 
     placas = [v["placa"] for _, v in assigned]
     logger.info(
-        "Worker %s: %s placa(s) → %s",
+        "Worker %s: %s placa(s) → %s (permanente=%s)",
         worker_id + 1,
         len(assigned),
         ", ".join(placas[:12]),
+        bool(existing_bot),
     )
     with progress_lock:
         progress[worker_id] = {
@@ -115,25 +118,39 @@ def _run_one_worker(
             "plates": placas,
         }
 
-    bot: Optional[SitraxBot] = None
+    bot: Optional[Any] = existing_bot if existing_bot is not None else None
     sub_tmp = download_dir / f"w{worker_id}"
     sub_tmp.mkdir(parents=True, exist_ok=True)
 
-    def _start() -> SitraxBot:
+    def _start() -> Any:
+        nonlocal bot
+        # reutiliza permanente se ainda vivo
+        if bot is not None:
+            try:
+                if bot.alive():
+                    debug_session.step(
+                        f"worker{worker_id+1}_reuso",
+                        f"Chrome {worker_id+1} permanente reutilizado — "
+                        f"{len(assigned)} placa(s): {', '.join(placas[:8])}",
+                        ok=True,
+                        screenshot=False,
+                    )
+                    return bot
+            except Exception:
+                pass
         b = SitraxBot(
             headless=True,
             download_dir=sub_tmp,
             quiet=True,
             low_memory=True,
         )
-        # Escalonado + lock: evita 3 logins simultâneos invalidarem cookie
-        _time.sleep(worker_id * 4.0)
+        _time.sleep(worker_id * 2.5)
         with _LOGIN_LOCK:
             b.start()
             b.login()
-            _time.sleep(1.5)
+            _time.sleep(1.2)
         b.open_posicoes()
-        b._sleep(1.0)
+        b._sleep(0.8)
         debug_session.step(
             f"worker{worker_id+1}_pronto",
             f"Chrome {worker_id+1} logado em Posições — "
@@ -141,16 +158,26 @@ def _run_one_worker(
             ok=True,
             screenshot=False,
         )
+        bot = b
+        if on_bot_replaced:
+            try:
+                on_bot_replaced(worker_id, b)
+            except Exception:
+                pass
         return b
 
     def _kill() -> None:
         nonlocal bot
-        if bot is not None:
-            try:
-                bot.close()
-            except Exception:
-                pass
-            bot = None
+        if bot is None:
+            return
+        # permanentes: não fecha no fim; só em crash (substitui)
+        if keep_alive and bot is existing_bot:
+            return
+        try:
+            bot.close()
+        except Exception:
+            pass
+        bot = None
 
     try:
         bot = _start()
@@ -288,7 +315,14 @@ def _run_one_worker(
                             ok=False,
                             screenshot=False,
                         )
-                        _kill()
+                        # fecha morto e sobe de novo (atualiza pool se permanente)
+                        if bot is not None:
+                            try:
+                                bot.close()
+                            except Exception:
+                                pass
+                            bot = None
+                        existing_bot = None  # força cold start
                         bot = _start()
                         continue
                     results.append(
@@ -310,14 +344,26 @@ def _run_one_worker(
                         screenshot=False,
                     )
                     if _is_crash(e):
-                        _kill()
+                        if bot is not None:
+                            try:
+                                bot.close()
+                            except Exception:
+                                pass
+                            bot = None
+                        existing_bot = None
                         try:
                             bot = _start()
                         except Exception:
                             bot = None
                     break
     finally:
-        _kill()
+        if not keep_alive:
+            if bot is not None:
+                try:
+                    bot.close()
+                except Exception:
+                    pass
+        # keep_alive: WarmPool.release_after_fleet devolve a Veículos
 
     return results
 
@@ -330,24 +376,31 @@ def run_fleet_parallel(
     download_dir: Path,
     n_workers: int = DEFAULT_WORKERS,
     job_message_cb: Optional[Any] = None,
+    existing_bots: Optional[list[tuple[int, Any]]] = None,
+    keep_alive: bool = False,
+    on_bot_replaced: Optional[Any] = None,
 ) -> list[PlateResult]:
     """
-    Sobe até n_workers Chromes, repartilha placas em round-robin, processa em paralelo.
-    Retorna resultados ordenados pela posição original na lista de frota.
+    2 Chromes em paralelo (round-robin).
+    existing_bots: bots permanentes [(id, bot), ...] — sem login de novo.
     """
     from app.bot import debug_session
 
-    n_workers = max(1, min(int(n_workers), 3))  # cap 3 no Railway
+    n_workers = max(1, min(int(n_workers), 2))  # frota = 2
     buckets = partition_round_robin(vehicles, n_workers)
 
-    # remove workers vazios do pool (frota pequena)
+    bot_by_id: dict[int, Any] = {}
+    if existing_bots:
+        for wid, b in existing_bots:
+            bot_by_id[int(wid)] = b
+
     active = [(i, b) for i, b in enumerate(buckets) if b]
     if not active:
         return []
 
     debug_session.step(
         "frota_workers",
-        f"{len(active)} Chrome(s) // round-robin: "
+        f"{len(active)} Chrome(s) permanentes // round-robin: "
         + " | ".join(
             f"W{i+1}=[{', '.join(v['placa'] for _, v in b[:6])}"
             f"{'…' if len(b) > 6 else ''}]"
@@ -388,6 +441,9 @@ def run_fleet_parallel(
                 download_dir,
                 progress,
                 progress_lock,
+                bot_by_id.get(wid),
+                keep_alive,
+                on_bot_replaced,
             ): wid
             for wid, bucket in active
         }

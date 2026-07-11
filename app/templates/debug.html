@@ -56,27 +56,41 @@
     </p>
 
     <div class="card">
-      <h2 style="font-size:1.05rem;margin:0 0 .5rem">Robô permanente (testes rápidos)</h2>
+      <h2 style="font-size:1.05rem;margin:0 0 .5rem">2 Chromes permanentes (Veículos)</h2>
       {% set w = warm or {} %}
       <p style="margin:.25rem 0">
         Status:
-        {% if w.ready %}<span class="status-ok">PRONTO em Veículos</span>
-        {% elif w.status == 'busy' %}<span class="status-run">ocupado — {{ w.last_plate or '…' }}</span>
+        {% if w.ready_count is defined and w.ready_count >= 2 %}<span class="status-ok">2/2 PRONTOS</span>
+        {% elif w.ready %}<span class="status-ok">{{ w.ready_count or 1 }}/2 pronto</span>
+        {% elif w.status == 'busy' or w.status == 'partial' %}<span class="status-run">{{ w.message or 'parcial' }}</span>
         {% elif w.status == 'starting' %}<span class="status-run">aquecendo…</span>
         {% elif w.status == 'error' %}<span class="status-err">erro</span>
         {% else %}<span class="status-run">{{ w.status or 'off' }}</span>{% endif %}
       </p>
       <p class="hint" style="margin:.25rem 0">{{ w.message or '—' }}</p>
+      {% if w.slots %}
+      <ul class="hint" style="margin:.35rem 0;padding-left:1.1rem">
+        {% for s in w.slots %}
+        <li>Chrome {{ s.id }}:
+          {% if s.ready %}<span class="status-ok">Veículos</span>
+          {% elif s.status == 'busy' %}<span class="status-run">ocupado</span>
+          {% elif s.status == 'error' %}<span class="status-err">erro</span>
+          {% else %}{{ s.status }}{% endif %}
+          — {{ s.message or '' }}
+        </li>
+        {% endfor %}
+      </ul>
+      {% endif %}
       {% if w.started_at %}<p class="meta">Desde {{ w.started_at }} · ok {{ w.plates_ok or 0 }} · err {{ w.plates_err or 0 }}</p>{% endif %}
       {% if w.last_error %}<pre style="white-space:pre-wrap;color:#fecaca;font-size:.8rem">{{ w.last_error }}</pre>{% endif %}
 
       <div style="display:flex;gap:.5rem;flex-wrap:wrap;margin-top:.75rem">
         <form method="post" action="/warm/start" style="flex:1;min-width:140px"
-              onsubmit="this.querySelector('button').disabled=true;this.querySelector('button').textContent='Abrindo…'">
-          <button type="submit">Manter aberto em Veículos</button>
+              onsubmit="this.querySelector('button').disabled=true;this.querySelector('button').textContent='Abrindo 2…'">
+          <button type="submit">Ligar 2 Chromes em Veículos</button>
         </form>
         <form method="post" action="/warm/stop" style="flex:1;min-width:120px">
-          <button type="submit" style="background:#374151">Desligar Chrome</button>
+          <button type="submit" style="background:#374151">Desligar os 2</button>
         </form>
       </div>
 

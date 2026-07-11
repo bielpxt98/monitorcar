@@ -1,11 +1,9 @@
 """
-Sessão permanente do Chrome no Sitrax.
+Pool de Chromes permanentes no Sitrax.
 
-Objetivo (testes rápidos / Etapa 1):
-  - Chrome sempre aberto
-  - Login já feito
-  - Parado em Posições com modal Veículos pronto
-  - Cada placa reutiliza a mesma sessão e volta para Veículos no fim
+- Sempre 2 navegadores logados, parados em Posições/Veículos.
+- 1 placa: usa um dos dois (livre) e devolve a Veículos.
+- Todos (frota): empresta os 2 em paralelo; no fim ambos voltam a aguardar.
 """
 
 from __future__ import annotations
@@ -21,39 +19,83 @@ from typing import Any, Optional
 
 logger = logging.getLogger(__name__)
 
+PERMANENT_SLOTS = 2
+_LOGIN_LOCK = threading.Lock()
 
-class WarmPool:
-    def __init__(self) -> None:
-        self._lock = threading.RLock()
-        self._bot: Any = None
-        self._tmp: Optional[Path] = None
+
+class WarmSlot:
+    def __init__(self, slot_id: int) -> None:
+        self.slot_id = slot_id
+        self.bot: Any = None
+        self.tmp: Optional[Path] = None
         self.status: str = "off"  # off | starting | ready | busy | error
         self.message: str = "Desligado"
+        self.lock = threading.RLock()
+
+    def alive(self) -> bool:
+        try:
+            return bool(self.bot and self.bot.alive())
+        except Exception:
+            return False
+
+
+class WarmPool:
+    def __init__(self, n_slots: int = PERMANENT_SLOTS) -> None:
+        self._lock = threading.RLock()
+        self._slots = [WarmSlot(i) for i in range(max(1, n_slots))]
         self.started_at: str = ""
         self.last_error: str = ""
         self.last_plate: str = ""
         self.plates_ok: int = 0
         self.plates_err: int = 0
+        self._rr: int = 0
 
     # ——— status ———
 
     def snapshot(self) -> dict:
         with self._lock:
-            alive = False
-            try:
-                alive = bool(self._bot and self._bot.alive())
-            except Exception:
-                alive = False
+            slots_info = []
+            ready_n = 0
+            busy_n = 0
+            for s in self._slots:
+                al = s.alive()
+                st = s.status if al or s.status in ("starting", "error", "off") else "dead"
+                if st == "ready" and al:
+                    ready_n += 1
+                if st == "busy" and al:
+                    busy_n += 1
+                slots_info.append(
+                    {
+                        "id": s.slot_id + 1,
+                        "status": st,
+                        "message": s.message,
+                        "alive": al,
+                        "ready": st == "ready" and al,
+                    }
+                )
+            if ready_n == len(self._slots):
+                status, msg = "ready", f"{ready_n}/{len(self._slots)} Chromes prontos em Veículos"
+            elif ready_n + busy_n > 0:
+                status, msg = "partial", f"{ready_n} prontos · {busy_n} ocupados / {len(self._slots)}"
+            elif any(s.status == "starting" for s in self._slots):
+                status, msg = "starting", "Aquecendo Chromes permanentes…"
+            elif any(s.status == "error" for s in self._slots):
+                status, msg = "error", self.last_error or "Erro no pool"
+            else:
+                status, msg = "off", "Desligado"
             return {
-                "status": self.status,
-                "message": self.message,
+                "status": status,
+                "message": msg,
                 "started_at": self.started_at,
                 "last_error": self.last_error,
                 "last_plate": self.last_plate,
                 "plates_ok": self.plates_ok,
                 "plates_err": self.plates_err,
-                "alive": alive,
-                "ready": self.status == "ready" and alive,
+                "alive": ready_n + busy_n > 0,
+                "ready": ready_n >= 1,
+                "ready_count": ready_n,
+                "slot_count": len(self._slots),
+                "slots": slots_info,
             }
 
     def is_ready(self) -> bool:
@@ -62,126 +104,168 @@ class WarmPool:
     # ——— lifecycle ———
 
     def start(self, headless: bool = True, low_memory: bool = True) -> dict:
-        """Abre Chrome, login, Posições → modal Veículos com lista."""
-        with self._lock:
-            return self._start_unlocked(headless=headless, low_memory=low_memory)
+        """Garante os 2 Chromes permanentes prontos."""
+        return self.ensure_both(headless=headless, low_memory=low_memory)
 
-    def _start_unlocked(self, headless: bool = True, low_memory: bool = True) -> dict:
+    def ensure_both(self, headless: bool = True, low_memory: bool = True) -> dict:
+        for i in range(len(self._slots)):
+            try:
+                self._ensure_slot(i, headless=headless, low_memory=low_memory)
+            except Exception as e:
+                logger.exception("Falha ao aquecer slot %s: %s", i + 1, e)
+                self.last_error = str(e)
+        if not self.started_at:
+            self.started_at = datetime.now().strftime("%d/%m/%Y %H:%M:%S")
+        return self.snapshot()
+
+    def _ensure_slot(
+        self, idx: int, headless: bool = True, low_memory: bool = True
+    ) -> None:
+        slot = self._slots[idx]
+        with slot.lock:
+            if slot.alive() and slot.status in ("ready", "busy"):
+                if slot.status == "ready":
+                    return
+                # busy: ok, não reinicia
+                return
+            self._boot_slot_unlocked(slot, headless=headless, low_memory=low_memory)
+
+    def _boot_slot_unlocked(
+        self, slot: WarmSlot, headless: bool = True, low_memory: bool = True
+    ) -> None:
         from app.bot.sitrax import SitraxBot
         from app.bot import debug_session
 
-        self.status = "starting"
-        self.message = "Abrindo Chrome e fazendo login…"
-        self.last_error = ""
-        self._stop_unlocked(keep_status=True)
+        self._close_slot_unlocked(slot, keep_status=True)
+        slot.status = "starting"
+        slot.message = f"Chrome {slot.slot_id + 1}: abrindo…"
+        # escalona login (Chrome 2 espera um pouco)
+        time.sleep(slot.slot_id * 3.5)
 
-        debug_session.start_run(placa="WARM")
-        tmp = Path(tempfile.mkdtemp(prefix="sitrax_warm_"))
-        bot: Optional[SitraxBot] = None
+        tmp = Path(tempfile.mkdtemp(prefix=f"sitrax_warm{slot.slot_id + 1}_"))
+        bot: Optional[Any] = None
         try:
-            bot = SitraxBot(
-                headless=headless,
-                download_dir=tmp,
-                quiet=True,
-                low_memory=low_memory,
-            )
-            bot.start()
-            bot._trace("warm_chrome", "Chrome iniciado (sessão permanente)", ok=True)
-            bot.login()
-            bot._trace("warm_login", "Login OK", ok=True)
+            with _LOGIN_LOCK:
+                bot = SitraxBot(
+                    headless=headless,
+                    download_dir=tmp,
+                    quiet=True,
+                    low_memory=low_memory,
+                )
+                bot.start()
+                bot.login()
+                time.sleep(1.0)
             bot.open_posicoes()
-            bot._trace("warm_posicoes", "Tela Posições", ok=True)
+            bot._sleep(0.6)
             bot.open_vehicle_selector()
             bot.load_vehicle_list()
             n = bot._count_vehicle_items()
-            bot._trace(
-                "warm_veiculos",
-                f"Modal Veículos aberto — {n} item(ns). Aguardando placa.",
+            slot.bot = bot
+            slot.tmp = tmp
+            slot.status = "ready"
+            slot.message = f"Chrome {slot.slot_id + 1}: Veículos ({n})"
+            debug_session.step(
+                f"warm{slot.slot_id + 1}_pronto",
+                f"Chrome permanente {slot.slot_id + 1} em Veículos ({n} itens)",
                 ok=True,
+                screenshot=False,
             )
-            self._bot = bot
-            self._tmp = tmp
-            self.status = "ready"
-            self.message = f"Pronto em Veículos ({n} na lista). Mande a placa."
-            self.started_at = datetime.now().strftime("%d/%m/%Y %H:%M:%S")
-            debug_session.finish_run(ok=True)
-            logger.info("WarmPool ready — %s veículos na lista", n)
-            return self.snapshot()
+            logger.info("Warm slot %s ready (%s veículos)", slot.slot_id + 1, n)
         except Exception as e:
-            logger.exception("WarmPool start falhou")
+            slot.status = "error"
+            slot.message = f"Chrome {slot.slot_id + 1}: falha — {e}"
             self.last_error = str(e)
-            self.status = "error"
-            self.message = f"Falha ao aquecer: {e}"
             try:
                 if bot is not None:
                     bot.close()
             except Exception:
                 pass
-            self._bot = None
+            slot.bot = None
             if tmp.exists():
                 shutil.rmtree(tmp, ignore_errors=True)
-            self._tmp = None
-            try:
-                debug_session.finish_run(ok=False, error=str(e))
-            except Exception:
-                pass
+            slot.tmp = None
             raise
 
     def stop(self) -> dict:
         with self._lock:
-            self._stop_unlocked(keep_status=False)
+            for slot in self._slots:
+                with slot.lock:
+                    self._close_slot_unlocked(slot, keep_status=False)
+            self.started_at = ""
             return self.snapshot()
 
-    def _stop_unlocked(self, keep_status: bool = False) -> None:
-        if self._bot is not None:
+    def _close_slot_unlocked(self, slot: WarmSlot, keep_status: bool = False) -> None:
+        if slot.bot is not None:
             try:
-                self._bot.close()
+                slot.bot.close()
             except Exception:
                 pass
-            self._bot = None
-        if self._tmp is not None:
+            slot.bot = None
+        if slot.tmp is not None:
             try:
-                shutil.rmtree(self._tmp, ignore_errors=True)
+                shutil.rmtree(slot.tmp, ignore_errors=True)
             except Exception:
                 pass
-            self._tmp = None
+            slot.tmp = None
         if not keep_status:
-            self.status = "off"
-            self.message = "Desligado"
-            self.started_at = ""
+            slot.status = "off"
+            slot.message = "Desligado"
 
     def ensure_ready(self, headless: bool = True, low_memory: bool = True) -> None:
-        with self._lock:
-            alive = False
-            try:
-                alive = bool(self._bot and self._bot.alive())
-            except Exception:
-                alive = False
-            if self.status == "ready" and alive:
-                return
-            logger.info("WarmPool ensure_ready: reaquecendo (status=%s alive=%s)", self.status, alive)
-            self._start_unlocked(headless=headless, low_memory=low_memory)
+        """Compat: pelo menos 1 pronto (preferência: os 2)."""
+        self.ensure_both(headless=headless, low_memory=low_memory)
 
-    def _return_to_vehicles(self) -> None:
-        bot = self._bot
-        if bot is None:
+    def _return_slot_to_vehicles(self, slot: WarmSlot) -> None:
+        if not slot.alive():
+            try:
+                self._boot_slot_unlocked(slot)
+            except Exception as e:
+                slot.status = "error"
+                slot.message = str(e)
+                raise
             return
         try:
-            bot.return_to_vehicles_ready()
-            n = bot._count_vehicle_items()
-            self.status = "ready"
-            self.message = f"De volta em Veículos ({n} na lista). Próxima placa?"
+            slot.bot.return_to_vehicles_ready()
+            n = slot.bot._count_vehicle_items()
+            slot.status = "ready"
+            slot.message = f"Chrome {slot.slot_id + 1}: Veículos ({n})"
         except Exception as e:
-            logger.warning("return_to_vehicles falhou: %s — reaquecendo", e)
+            logger.warning(
+                "Slot %s return_to_vehicles: %s — reaquecendo",
+                slot.slot_id + 1,
+                e,
+            )
             try:
-                self._start_unlocked()
+                self._boot_slot_unlocked(slot)
             except Exception as e2:
-                self.status = "error"
-                self.message = f"Sessão perdida: {e2}"
+                slot.status = "error"
+                slot.message = str(e2)
                 self.last_error = str(e2)
                 raise
 
-    # ——— consulta 1 placa (rápida) ———
+    # ——— 1 placa ———
+
+    def _acquire_slot(self) -> WarmSlot:
+        """Pega um slot ready (round-robin)."""
+        self.ensure_both()
+        with self._lock:
+            n = len(self._slots)
+            for off in range(n):
+                idx = (self._rr + off) % n
+                slot = self._slots[idx]
+                with slot.lock:
+                    if slot.alive() and slot.status == "ready":
+                        slot.status = "busy"
+                        slot.message = f"Chrome {slot.slot_id + 1}: pesquisando…"
+                        self._rr = (idx + 1) % n
+                        return slot
+            # nenhum ready: força o primeiro
+            slot = self._slots[0]
+            with slot.lock:
+                if not slot.alive():
+                    self._boot_slot_unlocked(slot)
+                slot.status = "busy"
+                return slot
 
     def run_plate(
         self,
@@ -190,10 +274,6 @@ class WarmPool:
         data_fim: Optional[date] = None,
         headless: bool = True,
     ):
-        """
-        Pesquisa 1 placa na sessão quente e volta para o modal Veículos.
-        Retorna ReportResult (mesmo tipo do pipeline).
-        """
         from app.bot.pipeline import report_from_positions
         from app.bot.report import positions_from_rows
         from app.bot import debug_session
@@ -209,105 +289,164 @@ class WarmPool:
         if data_fim != data_ini:
             data_ref += f" a {data_fim.strftime('%d/%m/%Y')}"
 
-        with self._lock:
-            self.ensure_ready(headless=headless, low_memory=True)
-            bot = self._bot
-            assert bot is not None
-            self.status = "busy"
-            self.message = f"Pesquisando {placa_u}…"
-            self.last_plate = placa_u
-
-            debug_session.start_run(placa=placa_u)
-            t0 = time.time()
-            try:
-                bot.prepare_historico_warm(placa_u, data_ini, data_fim)
-                debug_session.step(
-                    "warm_filtrado",
-                    f"{placa_u} filtrado na sessão quente",
-                    ok=True,
-                    screenshot=False,
-                )
-
-                result = None
-                # Preferência: tabela (mais leve). PDF se tabela vazia.
-                bot.try_scroll_all()
-                rows = bot.scrape_positions_table()
-                positions = positions_from_rows(rows)
-                n_pts = len([p for p in positions if p.when])
-                debug_session.step(
-                    "warm_tabela",
-                    f"{placa_u}: {n_pts} ponto(s) via tabela",
-                    ok=n_pts > 0,
-                    screenshot=False,
-                )
-
-                if n_pts > 0:
+        slot = self._acquire_slot()
+        bot = slot.bot
+        assert bot is not None
+        self.last_plate = placa_u
+        debug_session.start_run(placa=placa_u)
+        t0 = time.time()
+        try:
+            rows = bot.fetch_positions_for_fleet_plate(
+                placa_u,
+                data_ini=data_ini,
+                data_fim=data_fim,
+                clear_previous=True,
+            )
+            positions = positions_from_rows(rows)
+            n_pts = len([p for p in positions if p.when])
+            debug_session.step(
+                "warm_tabela",
+                f"Chrome {slot.slot_id + 1}: {placa_u} → {n_pts} pts",
+                ok=True,
+                screenshot=False,
+            )
+            result = None
+            if n_pts > 0:
+                result = report_from_positions(placa_u, positions, data_ref=data_ref)
+            else:
+                try:
+                    pdf = bot.download_historico_pdf(
+                        placa_u,
+                        data_ini=data_ini,
+                        data_fim=data_fim,
+                        dest_dir=slot.tmp,
+                        already_filtered=True,
+                    )
+                    if pdf and Path(pdf).exists():
+                        _, pdf_pos = positions_from_pdf(pdf)
+                        if pdf_pos:
+                            result = report_from_positions(
+                                placa_u, pdf_pos, data_ref=data_ref
+                            )
+                except Exception as e:
+                    logger.warning("Warm PDF fallback: %s", e)
+                if result is None:
                     result = report_from_positions(
                         placa_u, positions, data_ref=data_ref
                     )
-                else:
-                    # tenta PDF como fallback
+
+            self.plates_ok += 1
+            debug_session.finish_run(ok=True)
+            logger.info(
+                "Warm C%s %s ok em %.1fs (%s pts)",
+                slot.slot_id + 1,
+                placa_u,
+                time.time() - t0,
+                result.pontos,
+            )
+            return result
+        except Exception as e:
+            self.plates_err += 1
+            self.last_error = str(e)
+            debug_session.finish_run(ok=False, error=str(e))
+            logger.exception("Warm C%s falha em %s", slot.slot_id + 1, placa_u)
+            raise
+        finally:
+            if slot.tmp and slot.tmp.exists():
+                for f in slot.tmp.iterdir():
                     try:
-                        pdf = bot.download_historico_pdf(
-                            placa_u,
-                            data_ini=data_ini,
-                            data_fim=data_fim,
-                            dest_dir=self._tmp,
-                            already_filtered=True,
-                        )
-                        if pdf and Path(pdf).exists():
-                            _, pdf_pos = positions_from_pdf(pdf)
-                            if pdf_pos:
-                                result = report_from_positions(
-                                    placa_u, pdf_pos, data_ref=data_ref
-                                )
-                                debug_session.step(
-                                    "warm_pdf",
-                                    f"{placa_u}: {len(pdf_pos)} pts via PDF",
-                                    ok=True,
-                                    screenshot=False,
-                                )
-                    except Exception as e:
-                        logger.warning("Warm PDF fallback: %s", e)
-
-                    if result is None:
-                        result = report_from_positions(
-                            placa_u, positions, data_ref=data_ref
-                        )
-
-                elapsed = time.time() - t0
-                self.plates_ok += 1
-                debug_session.finish_run(ok=True)
-                logger.info(
-                    "WarmPool %s ok em %.1fs (%s pts)",
-                    placa_u,
-                    elapsed,
-                    result.pontos,
-                )
-                return result
+                        if f.is_file():
+                            f.unlink()
+                    except Exception:
+                        pass
+            try:
+                with slot.lock:
+                    self._return_slot_to_vehicles(slot)
             except Exception as e:
-                self.plates_err += 1
-                self.last_error = str(e)
-                debug_session.finish_run(ok=False, error=str(e))
-                logger.exception("WarmPool falha em %s", placa_u)
-                raise
-            finally:
-                # limpa downloads do temp da sessão (mantém pasta)
-                if self._tmp and self._tmp.exists():
-                    for f in self._tmp.iterdir():
+                logger.warning("Pós-placa slot %s: %s", slot.slot_id + 1, e)
+
+    # ——— frota: empresta os 2 ———
+
+    def borrow_for_fleet(self) -> list[tuple[int, Any]]:
+        """
+        Garante 2 Chromes e marca busy.
+        Retorna [(worker_id, bot), ...] para o fleet_workers.
+        """
+        self.ensure_both()
+        out: list[tuple[int, Any]] = []
+        with self._lock:
+            for slot in self._slots:
+                with slot.lock:
+                    if not slot.alive():
                         try:
-                            if f.is_file():
-                                f.unlink()
+                            self._boot_slot_unlocked(slot)
                         except Exception:
-                            pass
+                            continue
+                    slot.status = "busy"
+                    slot.message = f"Chrome {slot.slot_id + 1}: frota…"
+                    out.append((slot.slot_id, slot.bot))
+        return out
+
+    def replace_fleet_bot(self, worker_id: int, bot: Any) -> None:
+        """Atualiza o bot do slot após crash/restart na frota."""
+        if worker_id < 0 or worker_id >= len(self._slots):
+            return
+        slot = self._slots[worker_id]
+        with slot.lock:
+            # não fecha o bot antigo se for o mesmo
+            if slot.bot is not bot and slot.bot is not None:
                 try:
-                    self._return_to_vehicles()
-                except Exception as e:
-                    logger.warning("Pós-placa não voltou a Veículos: %s", e)
-                    if self.status != "error":
-                        self.status = "error"
-                        self.message = f"Não voltou a Veículos: {e}"
+                    if slot.bot is not bot:
+                        # old already closed by fleet worker
+                        pass
+                except Exception:
+                    pass
+            slot.bot = bot
+            slot.status = "busy"
+            slot.message = f"Chrome {slot.slot_id + 1}: frota (reiniciado)"
+
+    def release_after_fleet(self) -> dict:
+        """Devolve os 2 a Veículos (permanentes continuam ligados)."""
+        for slot in self._slots:
+            try:
+                with slot.lock:
+                    self._return_slot_to_vehicles(slot)
+            except Exception as e:
+                logger.warning("release slot %s: %s", slot.slot_id + 1, e)
+        return self.snapshot()
+
+    def list_fleet_plates(self) -> list[dict]:
+        """Usa Chrome 1 permanente para listar a frota (sem Chrome extra)."""
+        self.ensure_both()
+        slot = self._slots[0]
+        with slot.lock:
+            if not slot.alive():
+                self._boot_slot_unlocked(slot)
+            bot = slot.bot
+            assert bot is not None
+            was = slot.status
+            slot.status = "busy"
+            try:
+                if not bot._on_posicoes_screen():
+                    bot.open_posicoes()
+                bot._close_date_popup_if_open()
+                if not bot._vehicle_modal_open():
+                    bot.open_vehicle_selector()
+                bot.load_vehicle_list()
+                vehicles = bot.list_plates()
+                try:
+                    bot._d().execute_script(
+                        "if (typeof hideModalSearchVeiculo === 'function') "
+                        "hideModalSearchVeiculo();"
+                    )
+                except Exception:
+                    pass
+                return vehicles
+            finally:
+                try:
+                    self._return_slot_to_vehicles(slot)
+                except Exception:
+                    slot.status = was
 
 
-# singleton do processo
-warm_pool = WarmPool()
+warm_pool = WarmPool(n_slots=PERMANENT_SLOTS)

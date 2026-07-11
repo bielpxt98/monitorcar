@@ -41,18 +41,18 @@ def sitrax_configured() -> bool:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Ao subir: deixa o Chrome logado em Veículos (testes rápidos)."""
+    """Ao subir: 2 Chromes permanentes logados em Veículos."""
     if sitrax_configured():
 
         def _warm():
             try:
                 from app.bot.warm_pool import warm_pool
 
-                logger.info("Aquecendo robô permanente (login → Veículos)…")
-                warm_pool.start(headless=True, low_memory=True)
-                logger.info("Robô permanente pronto: %s", warm_pool.message)
+                logger.info("Aquecendo 2 Chromes permanentes (login → Veículos)…")
+                snap = warm_pool.start(headless=True, low_memory=True)
+                logger.info("Pool permanente: %s", snap.get("message"))
             except Exception as e:
-                logger.exception("Falha ao aquecer robô no startup: %s", e)
+                logger.exception("Falha ao aquecer pool no startup: %s", e)
 
         executor.submit(_warm)
     yield
@@ -167,56 +167,30 @@ def _run_job(modo: str, placa: str, d_ini: date, d_fim: date):
             headless=True,
         )
 
-    # ——— TODOS: 3 Chromes em paralelo (round-robin) ———
+    # ——— TODOS: 2 Chromes permanentes em paralelo (round-robin) ———
     from app.bot.summary_pdf import build_summary_pdf_bytes, safe_filename
     from app.bot.fleet_workers import run_fleet_parallel, DEFAULT_WORKERS
+    from app.bot.warm_pool import warm_pool
     from pypdf import PdfWriter, PdfReader
     import io
-
-    # Libera RAM: fecha sessão permanente (1 Chrome) antes dos 3 da frota
-    try:
-        from app.bot.warm_pool import warm_pool
-
-        warm_pool.stop()
-    except Exception:
-        pass
 
     debug_session.start_run(placa="FROTA")
     textos: list[str] = []
     pdf_writer = PdfWriter()
     total_pontos = 0
-    N_WORKERS = DEFAULT_WORKERS  # 3 navegadores
+    N_WORKERS = DEFAULT_WORKERS  # 2
 
     try:
         with TempWorkspace(prefix="sitrax_frota_") as tmp:
-            # 1 Chrome só para listar a frota (depois fecha)
-            lister = SitraxBot(
-                headless=True,
-                download_dir=tmp / "list",
-                quiet=True,
-                low_memory=True,
-            )
-            vehicles: list = []
-            try:
-                lister.start()
-                lister.login()
-                lister.open_posicoes()
-                lister.open_vehicle_selector()
-                lister.load_vehicle_list()
-                vehicles = lister.list_plates()
-            finally:
-                try:
-                    lister.close()
-                except Exception:
-                    pass
-
+            # Lista frota com Chrome permanente (sem 3º browser)
+            _JOB["message"] = "Listando frota (Chrome permanente)…"
+            vehicles = warm_pool.list_fleet_plates()
             vehicles = [
                 v
                 for v in vehicles
                 if v.get("placa")
                 and v["placa"].upper() not in ("TODOS", "TODAS", "ALL", "FROTA")
             ]
-            # ordem natural da lista Sitrax (posição 1,2,3… para o round-robin)
             if not vehicles:
                 debug_session.step(
                     "frota_vazia",
@@ -229,13 +203,13 @@ def _run_job(modo: str, placa: str, d_ini: date, d_fim: date):
                     "Tente 1 placa ou use o upload de PDF."
                 )
 
-            # preview da divisão: W1=1,4,7… W2=2,5,8… W3=3,6,9…
             w_preview = [[] for _ in range(N_WORKERS)]
             for i, v in enumerate(vehicles):
                 w_preview[i % N_WORKERS].append(v["placa"])
             debug_session.step(
                 "frota_lista",
-                f"Frota: {len(vehicles)} veículo(s) — {N_WORKERS} Chromes round-robin. "
+                f"Frota: {len(vehicles)} veículo(s) — {N_WORKERS} Chromes "
+                f"PERMANENTES round-robin. "
                 + " | ".join(
                     f"C{i+1}: {', '.join(w_preview[i][:8])}"
                     + ("…" if len(w_preview[i]) > 8 else "")
@@ -245,22 +219,39 @@ def _run_job(modo: str, placa: str, d_ini: date, d_fim: date):
                 ok=True,
                 screenshot=False,
             )
+
+            # Empresta os 2 já logados (sem fechar / sem login de novo)
+            borrowed = warm_pool.borrow_for_fleet()
             _JOB["message"] = (
-                f"Frota: 0/{len(vehicles)} — subindo {N_WORKERS} Chromes…"
+                f"Frota: 0/{len(vehicles)} — 2 Chromes permanentes em paralelo…"
             )
 
             def _msg(m: str) -> None:
                 _JOB["message"] = m
 
-            plate_results = run_fleet_parallel(
-                vehicles=vehicles,
-                data_ini=d_ini,
-                data_fim=d_fim,
-                data_ref=data_ref,
-                download_dir=tmp,
-                n_workers=N_WORKERS,
-                job_message_cb=_msg,
-            )
+            def _on_replaced(wid: int, bot) -> None:
+                warm_pool.replace_fleet_bot(wid, bot)
+
+            try:
+                plate_results = run_fleet_parallel(
+                    vehicles=vehicles,
+                    data_ini=d_ini,
+                    data_fim=d_fim,
+                    data_ref=data_ref,
+                    download_dir=tmp,
+                    n_workers=N_WORKERS,
+                    job_message_cb=_msg,
+                    existing_bots=borrowed,
+                    keep_alive=True,
+                    on_bot_replaced=_on_replaced,
+                )
+            finally:
+                # Devolve os 2 a Veículos (continuam ligados)
+                try:
+                    snap = warm_pool.release_after_fleet()
+                    logger.info("Após frota: %s", snap.get("message"))
+                except Exception as e:
+                    logger.warning("release_after_fleet: %s", e)
 
             for r in plate_results:
                 total_pontos += r.pontos
@@ -272,14 +263,6 @@ def _run_job(modo: str, placa: str, d_ini: date, d_fim: date):
                             pdf_writer.add_page(page)
                     except Exception as e:
                         logger.warning("PDF %s: %s", r.placa, e)
-
-            # Reaquece 1 Chrome permanente para testes de placa única
-            try:
-                from app.bot.warm_pool import warm_pool
-
-                warm_pool.start(headless=True, low_memory=True)
-            except Exception as e:
-                logger.warning("Reaquecer WarmPool após frota: %s", e)
 
         out = io.BytesIO()
         if len(pdf_writer.pages) == 0:
@@ -301,6 +284,10 @@ def _run_job(modo: str, placa: str, d_ini: date, d_fim: date):
         )
     except Exception as e:
         debug_session.finish_run(ok=False, error=str(e))
+        try:
+            warm_pool.release_after_fleet()
+        except Exception:
+            pass
         raise
 
 
