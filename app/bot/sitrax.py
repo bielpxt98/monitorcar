@@ -2379,7 +2379,10 @@ class SitraxBot:
             )
 
     def vehicle_chip_has_plate(self, placa: str) -> bool:
-        """True se a barra de filtros mostra o chip Veículo com essa placa."""
+        """
+        True se a barra de filtros mostra o chip Veículo com essa placa.
+        Aceita PT/EN, com/sem espaço após ':' (ex.: Vehicle:PDY1G26).
+        """
         placa_u = self._norm_placa(placa)
         if not placa_u:
             return False
@@ -2388,26 +2391,43 @@ class SitraxBot:
                 self._d().execute_script(
                     """
                     var alvo = (arguments[0] || '').toUpperCase().replace(/[^A-Z0-9]/g,'');
-                    if (!alvo) return false;
-                    var body = ((document.body && document.body.innerText) || '').toUpperCase();
-                    // chip "VEÍCULO: PDY4D85" / "VEHICLE: PDX3G64"
+                    if (!alvo || alvo.length < 5) return false;
+                    function norm(s) {
+                      return (s || '').toUpperCase().replace(/[^A-Z0-9:\\s]/g,'');
+                    }
+                    var body = norm(document.body && document.body.innerText);
                     if (body.indexOf(alvo) < 0) return false;
+                    // VEICULO:PLACA / VEHICLE: PLACA / VEÍCULO : PLACA
                     var re = new RegExp(
-                      'VE[IÍ]CULO\\\\s*:\\\\s*' + alvo + '|' +
+                      'VE[IÍ]?CULO\\\\s*:\\\\s*' + alvo + '|' +
                       'VEHICLE\\\\s*:\\\\s*' + alvo
                     );
                     if (re.test(body)) return true;
-                    // fallback: placa aparece perto da barra de filtros
-                    var nodes = document.querySelectorAll('div,span,button,a,label,li');
-                    for (var i = 0; i < nodes.length; i++) {
-                      var t = (nodes[i].innerText || nodes[i].textContent || '')
-                        .replace(/\\s+/g,' ').trim().toUpperCase();
-                      if (t.length > 60) continue;
-                      if (t.indexOf(alvo) >= 0 &&
-                          (t.indexOf('VEICULO') >= 0 || t.indexOf('VEÍCULO') >= 0 ||
-                           t.indexOf('VEHICLE') >= 0 || /^[A-Z]{3}/.test(t))) {
+                    // HTML cru (às vezes o chip só está no source)
+                    try {
+                      var src = (document.documentElement.innerHTML || '').toUpperCase();
+                      if (src.indexOf(alvo) >= 0 &&
+                          (src.indexOf('VEHICLE') >= 0 || src.indexOf('VEICULO') >= 0 ||
+                           src.indexOf('VEÍCULO') >= 0)) {
+                        if (new RegExp(alvo).test(src)) return true;
+                      }
+                    } catch (e) {}
+                    // nós curtos na barra de filtros
+                    var nodes = document.querySelectorAll(
+                      'div,span,button,a,label,li,p,b,strong'
+                    );
+                    for (var i = 0; i < Math.min(nodes.length, 400); i++) {
+                      var raw = (nodes[i].textContent || nodes[i].innerText || '');
+                      var t = raw.replace(/\\s+/g,' ').trim().toUpperCase();
+                      if (!t || t.length > 80) continue;
+                      var tn = t.replace(/[^A-Z0-9:]/g,'');
+                      if (tn.indexOf(alvo) < 0) continue;
+                      if (/VEICULO|VEHICLE|VEÍCULO/.test(t) || tn.indexOf('VEHICLE'+alvo) >= 0
+                          || tn.indexOf('VEICULO'+alvo) >= 0) {
                         return true;
                       }
+                      // só a placa num chip roxo/filtro
+                      if (tn === alvo || tn.indexOf(':'+alvo) >= 0) return true;
                     }
                     return false;
                     """,
@@ -2416,6 +2436,15 @@ class SitraxBot:
             )
         except Exception:
             return False
+
+    def wait_vehicle_chip(self, placa: str, timeout: float = 8.0) -> bool:
+        """Espera o chip estabilizar (evita chip_sem por página ainda carregando)."""
+        end = time.time() + timeout
+        while time.time() < end:
+            if self.vehicle_chip_has_plate(placa):
+                return True
+            self._sleep(0.45)
+        return self.vehicle_chip_has_plate(placa)
 
     def sitrax_says_no_records(self) -> bool:
         """
@@ -2598,22 +2627,24 @@ class SitraxBot:
                 )
             except Exception:
                 pass
-            self._sleep(0.35)
+            self._sleep(0.5)
 
-            if not self.vehicle_chip_has_plate(placa_u):
+            # Espera o chip (página/AJAX); se falhar, AINDA tenta Filter
+            # (caso PDY1G26: tela já tinha Vehicle:PDY1G26 + 852 regs e chip_sem era falso)
+            chip_ok = self.wait_vehicle_chip(placa_u, timeout=7.0)
+            if not chip_ok:
                 logger.warning(
-                    "Chip Veículo sem %s após select (tentativa %s) — refaz",
+                    "Chip %s não confirmado após espera (tentativa %s) — segue Filter",
                     placa_u,
                     attempt + 1,
                 )
                 self._trace(
-                    f"chip_sem_{placa_u}",
-                    f"Chip não mostrou {placa_u}",
-                    ok=False,
-                    shot=True,
+                    f"chip_lento_{placa_u}",
+                    f"Chip {placa_u} ainda não estável; segue Filter (pode ser timing)",
+                    ok=True,
+                    shot=False,
                 )
-                self.clear_vehicle_chip()
-                continue
+                # NÃO clear_vehicle_chip aqui — pode apagar seleção boa em meio ao AJAX
 
             try:
                 self.click_filtrar()
@@ -2637,28 +2668,37 @@ class SitraxBot:
             n_scrape = len(last_rows)
 
             # Zero REAL só com confirmação explícita do Sitrax — NÃO use n_hint==0
-            # (timeout antes da tabela carregar gerava 0 pts falso, ex. PDY4D85 212 reg)
             zero_real = self.sitrax_says_no_records() or self.showing_zero_records()
+            site_n = self.count_sitrax_registers()
 
             logger.info(
-                "Frota %s tentativa %s: grid~%s scrape=%s zero_real=%s",
+                "Frota %s tentativa %s: chip=%s grid~%s scrape=%s site=%s zero_real=%s",
                 placa_u,
                 attempt + 1,
+                chip_ok,
                 n_hint,
                 n_scrape,
+                site_n,
                 zero_real,
             )
 
-            if n_scrape > 0:
-                self._trace(
-                    f"frota_rows_{placa_u}",
-                    f"{n_scrape} linha(s) scrapadas (hint grid {n_hint})",
-                    ok=True,
-                )
-                return last_rows
+            # Sucesso se leu dados — mesmo sem chip confirmado (timing)
+            if n_scrape > 0 or (site_n is not None and site_n > 0 and self.grid_has_data_rows()):
+                if n_scrape == 0 and self.grid_has_data_rows():
+                    self.try_scroll_all()
+                    last_rows = self.scrape_positions_table() or []
+                    n_scrape = len(last_rows)
+                if n_scrape > 0:
+                    self._trace(
+                        f"frota_rows_{placa_u}",
+                        f"{n_scrape} linha(s) scrapadas (hint grid {n_hint}"
+                        f"{', chip lento' if not chip_ok else ''})",
+                        ok=True,
+                    )
+                    return last_rows
 
             # Sitrax mostrou explicitamente 0 → OK, sem retry
-            if zero_real and self.vehicle_chip_has_plate(placa_u):
+            if zero_real and (chip_ok or self.vehicle_chip_has_plate(placa_u)):
                 self._trace(
                     f"frota_sem_dados_{placa_u}",
                     f"{placa_u}: Sitrax 0 registros no período — OK (sem retry)",
@@ -2668,7 +2708,7 @@ class SitraxBot:
                 return []
 
             # Grade com dados mas scrape vazio → retry
-            if attempt == 0 and (self.grid_has_data_rows() or n_hint > 0):
+            if attempt == 0 and (self.grid_has_data_rows() or n_hint > 0 or (site_n or 0) > 0):
                 self._trace(
                     f"frota_scrape_miss_{placa_u}",
                     f"{placa_u}: há indício de dados (grid~{n_hint}) mas scrape 0 — retry",
@@ -2685,10 +2725,24 @@ class SitraxBot:
                 )
                 continue
 
+            # chip nunca confirmou E sem dados → aí sim refaz select
+            if attempt == 0 and not chip_ok:
+                self._trace(
+                    f"chip_sem_{placa_u}",
+                    f"Chip {placa_u} não confirmado e sem dados — refaz select",
+                    ok=False,
+                    shot=True,
+                )
+                try:
+                    self.clear_vehicle_chip()
+                except Exception:
+                    pass
+                continue
+
             self._save_debug(
                 f"frota_zero_{placa_u}_t{attempt+1}",
                 f"0 posições para {placa_u} tentativa {attempt+1} "
-                f"(zero_real={zero_real} n_hint={n_hint})",
+                f"(zero_real={zero_real} n_hint={n_hint} chip={chip_ok})",
                 ok=False,
             )
             break
