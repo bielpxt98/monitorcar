@@ -1158,162 +1158,331 @@ class SitraxBot:
             logger.warning("Filtro modal placa %s: %s", placa_u, e)
             return False
 
+    @staticmethod
+    def _norm_placa(s: str) -> str:
+        return re.sub(r"[^A-Z0-9]", "", (s or "").upper())
+
+    # Mercosul ABC1D23 | antiga ABC1234
+    _PLACA_TOKEN_RE = re.compile(r"^[A-Z]{3}\d[A-Z0-9]\d{2}$|^[A-Z]{3}\d{4}$", re.I)
+    _PLACA_SEARCH_RE = re.compile(
+        r"\b([A-Z]{3}\d[A-Z0-9]\d{2}|[A-Z]{3}\d{4})\b", re.I
+    )
+
+    def _extract_plate_token(self, text: str) -> str:
+        """Extrai a 1ª placa canônica de onclick/texto (match exato de token)."""
+        if not text:
+            return ""
+        # Preferir args de cadVeiculoSearchSelect('PLACA', ...)
+        m = re.search(
+            r"cadVeiculoSearchSelect\s*\(\s*['\"]([A-Za-z0-9\-]+)['\"]",
+            text,
+            re.I,
+        )
+        if m:
+            return self._norm_placa(m.group(1))
+        # Aspas soltas com formato de placa
+        for m in re.finditer(r"['\"]([A-Za-z0-9\-]{5,10})['\"]", text):
+            p = self._norm_placa(m.group(1))
+            if self._PLACA_TOKEN_RE.match(p):
+                return p
+        m2 = self._PLACA_SEARCH_RE.search((text or "").upper())
+        if m2:
+            return self._norm_placa(m2.group(1))
+        return ""
+
+    def _item_plate(self, el) -> str:
+        """Placa da linha do modal (onclick > spans > texto)."""
+        try:
+            oc = el.get_attribute("onclick") or ""
+            p = self._extract_plate_token(oc)
+            if p:
+                return p
+        except Exception:
+            pass
+        try:
+            texts = []
+            for s in el.find_elements(By.CSS_SELECTOR, "span.swMiniModalItemsText, span"):
+                t = (s.text or "").strip()
+                if t:
+                    texts.append(t)
+            blob = " ".join(texts) if texts else (el.text or "")
+            return self._extract_plate_token(blob)
+        except Exception:
+            return ""
+
+    def _scroll_modal_vehicle_list(self) -> None:
+        """Rola o corpo da lista do modal para carregar itens no fim da frota."""
+        d = self._d()
+        try:
+            d.execute_script(
+                """
+                var sels = [
+                  "div[onclick*='cadVeiculoSearchSelect']",
+                  "div.swModalContentListItem",
+                  "div[id$='_idDivSearchVeiculo']"
+                ];
+                var first = null;
+                for (var s = 0; s < sels.length && !first; s++) {
+                  first = document.querySelector(sels[s]);
+                }
+                if (!first) return;
+                var box = first.parentElement;
+                for (var i = 0; i < 8 && box; i++) {
+                  var st = window.getComputedStyle(box);
+                  var oy = st && st.overflowY;
+                  if ((oy === 'auto' || oy === 'scroll' || oy === 'overlay')
+                      && box.scrollHeight > box.clientHeight + 8) {
+                    box.scrollTop = box.scrollHeight;
+                    return;
+                  }
+                  box = box.parentElement;
+                }
+                try { first.scrollIntoView({block:'end'}); } catch(e) {}
+                """
+            )
+        except Exception:
+            pass
+
     def load_vehicle_list(self, placa: Optional[str] = None) -> None:
         """
         Abre/preenche a lista do modal de veículos.
-          - Se a lista já veio cheia e NÃO pediu placa: não clica na lupa.
-          - Se pediu placa (frota 1 a 1): SEMPRE filtra digitando a placa
-            (evita 'PCX5F06 não encontrada' com lista suja da placa anterior).
+          - Sem placa: garante lista carregada (para frota / list_plates).
+          - Com placa: SEMPRE filtra digitando a placa e SÓ retorna se a
+            linha exata existir (nunca aceita "lista com qualquer item").
         """
-        d = self._d()
         self._sleep(0.6)
-        placa_u = re.sub(r"[^A-Z0-9]", "", (placa or "").upper())
+        placa_u = self._norm_placa(placa or "")
 
-        # 1) Espera a lista carregar sozinha
-        for _ in range(12):
-            n = self._count_vehicle_items()
-            if n >= 1:
-                msg = f"Lista já pronta com {n} veículo(s) — NÃO clicar na lupa"
-                logger.info(msg)
-                self._trace("lista_ja_pronta", msg, ok=True, shot=True)
-                # se tem placa alvo, filtra mesmo com lista cheia
-                if placa_u:
-                    if self._find_vehicle_item(placa_u):
-                        self._trace(
-                            "placa_ja_na_lista",
-                            f"{placa_u} já visível na lista",
-                            ok=True,
-                        )
-                        return
-                    self._trace(
-                        "filtra_placa_lista_cheia",
-                        f"Filtrando modal por {placa_u}",
-                        ok=True,
-                        shot=True,
-                    )
-                    self._filter_modal_by_plate(placa_u)
-                    if self._find_vehicle_item(placa_u) or self._count_vehicle_items() >= 1:
-                        return
-                else:
+        def _ensure_list_or_lupa() -> None:
+            for _ in range(12):
+                if self._count_vehicle_items() >= 1:
                     return
-            self._sleep(0.4)
-
-        # 2) Ainda vazia → uma única vez a lupa preta de Placa
-        self._trace(
-            "lista_vazia_vai_lupa",
-            "Lista vazia após espera; clicando lupa de Placa UMA vez",
-            ok=True,
-            shot=True,
-        )
-        logger.info("Lista vazia; clicando lupa preta de Placa (1x)…")
-        if not self._click_placa_lupa_preta():
+                self._sleep(0.4)
+            self._trace(
+                "lista_vazia_vai_lupa",
+                "Lista vazia após espera; clicando lupa de Placa UMA vez",
+                ok=True,
+                shot=True,
+            )
+            logger.info("Lista vazia; clicando lupa preta de Placa (1x)…")
+            if not self._click_placa_lupa_preta():
+                self._save_debug(
+                    "lupa_preta_placa_nao_achada",
+                    "Lupa de Placa não encontrada",
+                    ok=False,
+                )
+                raise TimeoutException(
+                    "Lista vazia e não achei a lupa preta ao lado de Placa. "
+                    "Abra /debug."
+                )
+            self._wait_loader_gone(45)
+            self._sleep(1.0)
+            end = time.time() + 25
+            while time.time() < end:
+                n = self._count_vehicle_items()
+                if n >= 1:
+                    self._save_debug(
+                        "lista_apos_lupa_placa",
+                        f"Veículos após lupa Placa: {n} item(ns)",
+                        ok=True,
+                    )
+                    return
+                self._sleep(0.4)
             self._save_debug(
-                "lupa_preta_placa_nao_achada",
-                "Lupa de Placa não encontrada",
+                "lista_vazia_apos_lupa_placa",
+                "Lista continua vazia após lupa",
                 ok=False,
             )
             raise TimeoutException(
-                "Lista vazia e não achei a lupa preta ao lado de Placa. "
-                "Abra /debug."
+                "Modal aberto mas a lista de veículos não carregou. "
+                "Abra /debug para calibrar."
             )
 
-        self._wait_loader_gone(45)
-        self._sleep(1.2)
+        _ensure_list_or_lupa()
+        n0 = self._count_vehicle_items()
+        self._trace(
+            "lista_ja_pronta",
+            f"Lista pronta com {n0} veículo(s)",
+            ok=True,
+            shot=True,
+        )
 
-        end = time.time() + 25
-        while time.time() < end:
-            n = self._count_vehicle_items()
-            if n >= 1:
-                msg = f"Veículos após lupa Placa: {n} item(ns)"
-                logger.info(msg)
-                self._save_debug("lista_apos_lupa_placa", msg, ok=True)
-                if placa_u and not self._find_vehicle_item(placa_u):
-                    self._filter_modal_by_plate(placa_u)
-                return
-            self._sleep(0.4)
+        if not placa_u:
+            return
 
-        # 3) Ainda vazio / sem a placa: digita no filtro
-        if placa_u:
+        # Com placa alvo: filtrar SEMPRE (lista suja da placa anterior)
+        # e exigir match EXATO — não basta count >= 1.
+        for attempt in range(2):
             self._trace(
-                "lista_ainda_vazia_digita_placa",
-                f"Digitando placa {placa_u} no filtro e filtrando",
+                "filtra_placa_modal",
+                f"Filtrando modal por {placa_u} (tentativa {attempt + 1})",
                 ok=True,
                 shot=True,
             )
             self._filter_modal_by_plate(placa_u)
-            if self._count_vehicle_items() >= 1 or self._find_vehicle_item(placa_u):
-                self._trace("lista_ok_apos_digitar", f"Achou {placa_u}", ok=True)
-                return
+            self._sleep(0.5)
+            # rola lista filtrada (última da frota às vezes só no fim)
+            for _ in range(4):
+                if self._find_vehicle_item(placa_u) is not None:
+                    self._trace(
+                        "placa_na_lista_apos_filtro",
+                        f"{placa_u} encontrada na linha do modal",
+                        ok=True,
+                    )
+                    return
+                self._scroll_modal_vehicle_list()
+                self._sleep(0.35)
 
-        self._save_debug(
-            "lista_vazia_apos_lupa_placa",
-            "Lista continua vazia após lupa (e filtro por placa)",
-            ok=False,
-        )
-        raise TimeoutException(
-            "Modal aberto mas a lista de veículos não carregou. "
-            "Se a lupa já tinha lista, não deveria clicar de novo — "
-            "abra /debug para calibrar."
+        self._save_debug(f"placa_nao_na_lista_{placa_u}", ok=False)
+        sample = ""
+        try:
+            sample = ", ".join(v["placa"] for v in self.list_plates()[:15])
+        except Exception:
+            pass
+        raise NoSuchElementException(
+            f"Placa {placa_u} não apareceu na lista do modal após filtrar. "
+            f"Amostra: {sample}. Veja {DEBUG_DIR}"
         )
 
     def list_plates(self) -> list[dict]:
-        """Lista placas do modal (div.swModalContentListItem + cadVeiculoSearchSelect)."""
+        """
+        Lista placas do modal (cadVeiculoSearchSelect / swModalContentListItem).
+        Rola a lista para não perder as últimas placas da frota.
+        """
         d = self._d()
-        vehicles: list[dict] = []
-        items = d.find_elements(
-            By.CSS_SELECTOR, "div[onclick*='cadVeiculoSearchSelect'], div.swModalContentListItem"
-        )
-        for i, item in enumerate(items):
-            try:
-                oc = item.get_attribute("onclick") or ""
-                m = re.search(r"'([A-Z]{3}\d[A-Z0-9]\d{2}|[A-Z]{3}\d{4})'", oc)
-                texts = [
-                    s.text.strip()
-                    for s in item.find_elements(By.CSS_SELECTOR, "span.swMiniModalItemsText")
-                ]
-                placa = m.group(1) if m else ""
-                if not placa and texts:
-                    mm = re.search(
-                        r"([A-Z]{3}\d[A-Z0-9]\d{2}|[A-Z]{3}\d{4})",
-                        " ".join(texts).upper(),
-                    )
-                    placa = mm.group(1) if mm else ""
-                if not placa:
-                    continue
-                vehicles.append(
-                    {
+        by_placa: dict[str, dict] = {}
+
+        def _harvest() -> None:
+            items = d.find_elements(
+                By.CSS_SELECTOR,
+                "div[onclick*='cadVeiculoSearchSelect'], div.swModalContentListItem",
+            )
+            for i, item in enumerate(items):
+                try:
+                    placa = self._item_plate(item)
+                    if not placa or placa in by_placa:
+                        continue
+                    texts = [
+                        s.text.strip()
+                        for s in item.find_elements(
+                            By.CSS_SELECTOR, "span.swMiniModalItemsText"
+                        )
+                        if (s.text or "").strip()
+                    ]
+                    by_placa[placa] = {
                         "placa": placa,
                         "display": texts[1] if len(texts) > 1 else "",
                         "cliente": texts[2] if len(texts) > 2 else "",
                         "serial": texts[3] if len(texts) > 3 else "",
                         "index": i,
                     }
-                )
-            except StaleElementReferenceException:
-                continue
+                except StaleElementReferenceException:
+                    continue
+
+        # Várias passagens com scroll — últimas linhas costumam estar no fim
+        for pass_i in range(8):
+            _harvest()
+            before = len(by_placa)
+            self._scroll_modal_vehicle_list()
+            self._sleep(0.25)
+            _harvest()
+            if pass_i >= 2 and len(by_placa) == before:
+                break
+
+        vehicles = list(by_placa.values())
+        # index estável na ordem em que o DOM/scroll revelou
+        for i, v in enumerate(vehicles):
+            v["index"] = i
         logger.info("Veículos: %s", len(vehicles))
         return vehicles
 
     def _find_vehicle_item(self, placa_u: str):
         """
-        Encontra o item do modal Sitrax para a placa.
-        Não exige is_displayed (itens fora do scroll ainda valem).
+        Encontra a LINHA do modal com a placa EXATA.
+        Não usa contains frouxo (evita pegar linha errada).
+        Rola a lista se a placa estiver no fim.
         """
         d = self._d()
-        placa_u = re.sub(r"[^A-Z0-9]", "", (placa_u or "").upper())
+        placa_u = self._norm_placa(placa_u)
         if not placa_u:
             return None
 
-        def _norm(s: str) -> str:
-            return re.sub(r"[^A-Z0-9]", "", (s or "").upper())
+        def _scan():
+            # 1) divs com cadVeiculoSearchSelect — match exato no token da placa
+            for el in d.find_elements(
+                By.CSS_SELECTOR, "div[onclick*='cadVeiculoSearchSelect']"
+            ):
+                try:
+                    if self._item_plate(el) == placa_u:
+                        try:
+                            d.execute_script(
+                                "arguments[0].scrollIntoView({block:'center'});", el
+                            )
+                        except Exception:
+                            pass
+                        return el
+                except StaleElementReferenceException:
+                    continue
 
-        # 1) onclick cadVeiculoSearchSelect (mais confiável)
-        for el in d.find_elements(
-            By.CSS_SELECTOR, "div[onclick*='cadVeiculoSearchSelect']"
-        ):
+            # 2) list item genérico — placa exata no texto normalizado
+            for el in d.find_elements(
+                By.CSS_SELECTOR,
+                "div.swModalContentListItem, div[id$='_idDivSearchVeiculo']",
+            ):
+                try:
+                    if self._item_plate(el) == placa_u:
+                        try:
+                            d.execute_script(
+                                "arguments[0].scrollIntoView({block:'center'});", el
+                            )
+                        except Exception:
+                            pass
+                        return el
+                except StaleElementReferenceException:
+                    continue
+
+            # 3) JS: percorre onclick e devolve o nó com token exato
             try:
-                oc = el.get_attribute("onclick") or ""
-                if f"'{placa_u}'" in oc or f'"{placa_u}"' in oc or placa_u in _norm(oc):
+                el = d.execute_script(
+                    """
+                    var alvo = (arguments[0] || '').toUpperCase().replace(/[^A-Z0-9]/g,'');
+                    if (!alvo) return null;
+                    function norm(s) {
+                      return (s || '').toUpperCase().replace(/[^A-Z0-9]/g,'');
+                    }
+                    function plateFrom(el) {
+                      var oc = el.getAttribute('onclick') || '';
+                      var m = oc.match(/cadVeiculoSearchSelect\\s*\\(\\s*['\"]([^'\"]+)['\"]/i);
+                      if (m) return norm(m[1]);
+                      var quotes = oc.match(/['\"]([A-Za-z0-9\\-]{5,10})['\"]/g) || [];
+                      for (var q = 0; q < quotes.length; q++) {
+                        var t = norm(quotes[q].replace(/['\"]/g,''));
+                        if (/^[A-Z]{3}\\d[A-Z0-9]\\d{2}$/.test(t) || /^[A-Z]{3}\\d{4}$/.test(t))
+                          return t;
+                      }
+                      return norm(el.innerText || el.textContent || '');
+                    }
+                    var nodes = document.querySelectorAll(
+                      "div[onclick*='cadVeiculoSearchSelect'], div.swModalContentListItem"
+                    );
+                    for (var i = 0; i < nodes.length; i++) {
+                      var p = plateFrom(nodes[i]);
+                      // SOMENTE match exato do token da placa (evita linha errada)
+                      if (p === alvo) return nodes[i];
+                      // fallback: texto da linha tem a placa como token isolado
+                      var raw = norm(nodes[i].innerText || '');
+                      if (raw === alvo) return nodes[i];
+                      var re = new RegExp('(?:^|[^A-Z0-9])' + alvo + '(?:[^A-Z0-9]|$)');
+                      if (re.test(raw) && (p === alvo || !p || p.length > 12)) {
+                        // se plateFrom devolveu lixo longo (texto inteiro), aceita token isolado
+                        if (p === alvo || p.length > 12) return nodes[i];
+                      }
+                    }
+                    return null;
+                    """,
+                    placa_u,
+                )
+                if el is not None:
                     try:
                         d.execute_script(
                             "arguments[0].scrollIntoView({block:'center'});", el
@@ -1321,106 +1490,64 @@ class SitraxBot:
                     except Exception:
                         pass
                     return el
-            except StaleElementReferenceException:
-                continue
+            except Exception as e:
+                logger.debug("JS _find_vehicle_item: %s", e)
+            return None
 
-        # 2) XPath no onclick
-        for el in d.find_elements(
-            By.XPATH,
-            f"//div[contains(@onclick,\"'{placa_u}'\") or contains(@onclick,'{placa_u}')]",
-        ):
-            try:
-                d.execute_script(
-                    "arguments[0].scrollIntoView({block:'center'});", el
-                )
-                return el
-            except Exception:
-                continue
-
-        # 3) span com texto da placa
-        for el in d.find_elements(
-            By.XPATH,
-            f"//span[contains(translate(normalize-space(.),"
-            f"'abcdefghijklmnopqrstuvwxyz- ','ABCDEFGHIJKLMNOPQRSTUVWXYZ'),'{placa_u}')]"
-            f"/ancestor::div[contains(@class,'swModalContentListItem') "
-            f"or contains(@onclick,'cadVeiculoSearchSelect')][1]",
-        ):
-            try:
-                d.execute_script(
-                    "arguments[0].scrollIntoView({block:'center'});", el
-                )
-                return el
-            except Exception:
-                continue
-
-        # 4) qualquer list item cujo texto normalize contenha a placa
-        for el in d.find_elements(
-            By.CSS_SELECTOR,
-            "div.swModalContentListItem, div[onclick*='cadVeiculoSearchSelect']",
-        ):
-            try:
-                if placa_u in _norm(el.text or ""):
-                    d.execute_script(
-                        "arguments[0].scrollIntoView({block:'center'});", el
-                    )
-                    return el
-            except Exception:
-                continue
+        found = _scan()
+        if found is not None:
+            return found
+        # última da lista: rolar e reescanear
+        for _ in range(6):
+            self._scroll_modal_vehicle_list()
+            self._sleep(0.2)
+            found = _scan()
+            if found is not None:
+                return found
         return None
 
     def select_vehicle_by_plate(self, placa: str) -> dict:
         """
         Seleciona veículo no modal Sitrax via cadVeiculoSearchSelect + checkbox,
         depois selectVeiculoSearch() / botão Selecionar.
+
+        Sempre filtra pela placa e exige linha com token EXATO (últimas da
+        frota falhavam com match frouxo / sem scroll).
         """
         d = self._d()
-        placa_u = re.sub(r"[^A-Z0-9]", "", placa.upper())
-        logger.info("Selecionando placa %s (modo Sitrax div/checkbox)", placa_u)
+        placa_u = self._norm_placa(placa)
+        logger.info("Selecionando placa %s (match exato + filtro modal)", placa_u)
 
-        # espera lista (divs) aparecer; se não achar, filtra pela placa
+        # 1) SEMPRE filtrar pela placa (lista suja / placa no fim)
+        self._filter_modal_by_plate(placa_u)
+        self._sleep(0.5)
+
         item = None
-        end = time.time() + 20
-        filtered = False
+        end = time.time() + 22
         while time.time() < end:
-            if self._vehicle_rows_visible() or self._count_vehicle_items() >= 1:
-                item = self._find_vehicle_item(placa_u)
-                if item is not None:
-                    break
-                if not filtered:
-                    self._filter_modal_by_plate(placa_u)
-                    filtered = True
-                    self._sleep(0.6)
-                    item = self._find_vehicle_item(placa_u)
-                    if item is not None:
-                        break
+            item = self._find_vehicle_item(placa_u)
+            if item is not None:
+                break
+            self._scroll_modal_vehicle_list()
             time.sleep(0.35)
 
         if item is None:
-            item = self._find_vehicle_item(placa_u)
-
-        if item is None and not filtered:
+            # 2ª chance: limpa filtro (lupa) e filtra de novo
+            try:
+                self._click_placa_lupa_preta()
+                self._wait_loader_gone(30)
+                self._sleep(0.5)
+            except Exception:
+                pass
             self._filter_modal_by_plate(placa_u)
-            self._sleep(0.8)
+            self._sleep(0.6)
             item = self._find_vehicle_item(placa_u)
 
         if item is None:
             self._save_debug(f"placa_nao_encontrada_{placa_u}")
             try:
-                n = d.execute_script(
-                    "return document.querySelectorAll(\"div[onclick*='cadVeiculoSearchSelect']\").length;"
-                )
-                sample = d.execute_script(
-                    """
-                    var nodes = document.querySelectorAll("div[onclick*='cadVeiculoSearchSelect']");
-                    var out = [];
-                    for (var i = 0; i < Math.min(nodes.length, 20); i++) {
-                      var oc = nodes[i].getAttribute('onclick') || '';
-                      var m = oc.match(/'([A-Z0-9]{7})'/i);
-                      out.push(m ? m[1] : (nodes[i].innerText||'').slice(0,20));
-                    }
-                    return out.join(', ');
-                    """
-                )
+                n = self._count_vehicle_items()
+                sample = ", ".join(v["placa"] for v in self.list_plates()[:20])
             except Exception:
                 n, sample = "?", ""
             raise NoSuchElementException(
@@ -1429,17 +1556,36 @@ class SitraxBot:
                 f"Veja {DEBUG_DIR}"
             )
 
-        # --- marcar via função nativa do Sitrax (melhor que clicar no rádio genérico) ---
+        # Confirma que a linha é realmente a placa pedida
+        got = self._item_plate(item)
+        if got and got != placa_u:
+            self._save_debug(f"placa_mismatch_{placa_u}_vs_{got}", ok=False)
+            raise NoSuchElementException(
+                f"Linha errada no modal: pedi {placa_u}, achei {got}."
+            )
+
+        # --- marcar via função nativa do Sitrax ---
         selected_ok = False
         try:
             oc = item.get_attribute("onclick") or ""
-            # tenta executar o onclick inteiro
-            d.execute_script(
-                "arguments[0].scrollIntoView({block:'center'});", item
-            )
-            d.execute_script(oc if oc.strip().endswith(";") else oc + ";")
-            selected_ok = True
-            logger.info("Executou cadVeiculoSearchSelect via onclick para %s", placa_u)
+            tok = self._extract_plate_token(oc) if oc else ""
+            # só executa onclick se o token for a placa pedida (ou ilegível)
+            if oc and tok in ("", placa_u):
+                d.execute_script(
+                    "arguments[0].scrollIntoView({block:'center'});", item
+                )
+                d.execute_script(oc if oc.strip().endswith(";") else oc + ";")
+                selected_ok = True
+                logger.info(
+                    "Executou cadVeiculoSearchSelect via onclick para %s", placa_u
+                )
+            else:
+                d.execute_script(
+                    "arguments[0].scrollIntoView({block:'center'});"
+                    "arguments[0].click();",
+                    item,
+                )
+                selected_ok = True
         except Exception as e:
             logger.warning("onclick falhou (%s); tentando click no div", e)
             try:
@@ -1454,7 +1600,9 @@ class SitraxBot:
 
         # marca checkbox se existir
         try:
-            cb = item.find_element(By.CSS_SELECTOR, "input[type='checkbox'], input.swCheckBoxCustom")
+            cb = item.find_element(
+                By.CSS_SELECTOR, "input[type='checkbox'], input.swCheckBoxCustom"
+            )
             d.execute_script(
                 """
                 var c = arguments[0];
@@ -1492,14 +1640,14 @@ class SitraxBot:
         except Exception as e:
             logger.warning("JS selectVeiculoSearch falhou: %s", e)
 
-        # também clica no botão visual (onclick="selectVeiculoSearch(); hideModalSearchVeiculo();")
         sel = None
         for el in d.find_elements(
             By.XPATH,
             "//*[contains(@onclick,'selectVeiculoSearch')] | "
             "//button[contains(.,'Selecionar') or contains(.,'Select')] | "
             "//a[contains(.,'Selecionar') or contains(.,'Select')] | "
-            "//span[normalize-space()='Selecionar' or normalize-space()='Select']/ancestor::*[self::button or self::a or self::div][1]",
+            "//span[normalize-space()='Selecionar' or normalize-space()='Select']"
+            "/ancestor::*[self::button or self::a or self::div][1]",
         ):
             try:
                 if el.is_displayed():
@@ -1520,7 +1668,7 @@ class SitraxBot:
         self._wait_loader_gone(25)
         self._sleep(1.0)
 
-        # modal deve sumir
+        # modal deve sumir (senão o Filter da barra some / erra)
         try:
             body = d.find_element(By.TAG_NAME, "body").text
         except Exception:
@@ -1537,11 +1685,15 @@ class SitraxBot:
                 self._sleep(0.5)
             except Exception:
                 pass
+            try:
+                # Escape / clique fora
+                from selenium.webdriver.common.keys import Keys
+
+                d.find_element(By.TAG_NAME, "body").send_keys(Keys.ESCAPE)
+            except Exception:
+                pass
             body = d.find_element(By.TAG_NAME, "body").text
-            if (
-                "Selecione Veículo" in body
-                or "Select Vehicle" in body
-            ):
+            if "Selecione Veículo" in body or "Select Vehicle" in body:
                 self._save_debug(f"modal_ainda_aberto_{placa_u}")
                 logger.warning("Modal ainda aberto após Select/Selecionar")
 
@@ -1644,9 +1796,26 @@ class SitraxBot:
         logger.info("Data filtro ajustada: %s → %s", ini_br, fim_br)
 
     def click_filtrar(self) -> None:
-        """Clica no botão laranja Filtrar/Filter da barra principal."""
+        """Clica no botão laranja Filtrar/Filter da barra principal (não do modal)."""
         d = self._d()
         self._close_date_popup_if_open()
+        # Garante modal de veículo fechado — senão o Filter some e estoura timeout
+        try:
+            body0 = (d.find_element(By.TAG_NAME, "body").text or "")
+            if (
+                "Selecione Veículo" in body0
+                or "Selecione Veiculo" in body0
+                or "Select Vehicle" in body0
+                or "formModalSearchVeiculo" in (d.page_source or "")[:5000]
+            ):
+                d.execute_script(
+                    "if (typeof hideModalSearchVeiculo === 'function') hideModalSearchVeiculo();"
+                    "if (typeof selectVeiculoSearch === 'function') { /* noop */ }"
+                )
+                self._sleep(0.4)
+        except Exception:
+            pass
+
         btn = None
         for el in d.find_elements(
             By.XPATH,
@@ -1656,6 +1825,31 @@ class SitraxBot:
             try:
                 if not el.is_displayed():
                     continue
+                # ignora botões dentro de modal de veículo / filtro de data
+                try:
+                    in_modal = el.find_elements(
+                        By.XPATH,
+                        "./ancestor::*[contains(@id,'Modal') or contains(@id,'modal') "
+                        "or contains(@class,'modal') or contains(@class,'popup')][1]",
+                    )
+                    if in_modal:
+                        mid = (
+                            (in_modal[0].get_attribute("id") or "")
+                            + " "
+                            + (in_modal[0].get_attribute("class") or "")
+                        ).lower()
+                        if any(
+                            x in mid
+                            for x in (
+                                "veiculo",
+                                "vehicle",
+                                "searchveiculo",
+                                "filtrodata",
+                            )
+                        ):
+                            continue
+                except Exception:
+                    pass
                 parent_txt = ""
                 try:
                     parent_txt = el.find_element(
@@ -1664,23 +1858,75 @@ class SitraxBot:
                     ).text
                 except Exception:
                     parent_txt = ""
-                if "Filtro Data" in parent_txt or "Início" in parent_txt or "Date Filter" in parent_txt:
+                if "Filtro Data" in parent_txt or "Date Filter" in parent_txt:
+                    continue
+                if "Selecione Veículo" in parent_txt or "Select Vehicle" in parent_txt:
                     continue
                 btn = el
                 cls = el.get_attribute("class") or ""
-                if "orange" in cls.lower() or "primary" in cls.lower() or "filtrar" in cls.lower() or "filter" in cls.lower():
+                if (
+                    "orange" in cls.lower()
+                    or "primary" in cls.lower()
+                    or "filtrar" in cls.lower()
+                    or "filter" in cls.lower()
+                ):
                     break
             except Exception:
                 continue
+
+        if not btn:
+            # JS: botão Filter/Filtrar visível fora de modal de veículo
+            try:
+                btn = d.execute_script(
+                    """
+                    function vis(el) {
+                      var r = el.getBoundingClientRect();
+                      return r.width > 2 && r.height > 2;
+                    }
+                    var nodes = document.querySelectorAll('button,a,input[type=button],input[type=submit]');
+                    var best = null;
+                    for (var i = 0; i < nodes.length; i++) {
+                      var el = nodes[i];
+                      if (!vis(el)) continue;
+                      var t = (el.innerText || el.value || el.textContent || '').replace(/\\s+/g,' ').trim();
+                      if (t !== 'Filter' && t !== 'Filtrar' && t !== 'FILTER' && t !== 'FILTRAR') {
+                        if (!/^(Filter|Filtrar)\\b/i.test(t) || t.length > 18) continue;
+                      }
+                      if (el.closest && (
+                          el.closest('#formModalSearchVeiculo') ||
+                          el.closest('[id*="ModalSearchVeiculo"]') ||
+                          el.closest('[id*="FiltroData"]')
+                      )) continue;
+                      var cls = (el.className || '') + '';
+                      if (/orange|primary|btn-warning|btn-filter/i.test(cls)) return el;
+                      if (!best) best = el;
+                    }
+                    return best;
+                    """
+                )
+            except Exception:
+                btn = None
+
         if not btn:
             btn = self._find_first(
                 [
+                    (By.XPATH, "//button[normalize-space()='Filter' or normalize-space()='Filtrar']"),
+                    (By.XPATH, "//a[normalize-space()='Filter' or normalize-space()='Filtrar']"),
                     (By.XPATH, "//button[contains(., 'Filtrar') or contains(., 'Filter')]"),
                     (By.XPATH, "//a[contains(., 'Filtrar') or contains(., 'Filter')]"),
                 ],
-                timeout=10,
+                timeout=12,
             )
-        self._click(btn)
+        try:
+            d.execute_script(
+                "arguments[0].scrollIntoView({block:'center'});", btn
+            )
+        except Exception:
+            pass
+        try:
+            d.execute_script("arguments[0].click();", btn)
+        except Exception:
+            self._click(btn)
         self._wait_loader_gone(40)
         self._sleep(1.5)
 
@@ -2496,10 +2742,12 @@ class SitraxBot:
         from app.bot.report import build_narrative_report
 
         vehicles = self.get_all_plates()
+        # Últimas da lista primeiro (mais propensas a falhar no modal)
+        vehicles = list(reversed(vehicles))
         parts: list[str] = []
         data_ref = (data_ini or date.today()).strftime("%d/%m/%Y")
         parts.append(f"📊 Relatório geral — {data_ref}")
-        parts.append(f"Veículos na frota: {len(vehicles)}\n")
+        parts.append(f"Veículos na frota: {len(vehicles)} (ordem: últimas primeiro)\n")
         parts.append("=" * 40)
 
         for i, v in enumerate(vehicles[:max_vehicles]):

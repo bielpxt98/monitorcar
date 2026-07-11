@@ -204,9 +204,12 @@ def _run_job(modo: str, placa: str, d_ini: date, d_fim: date):
                     if v.get("placa")
                     and v["placa"].upper() not in ("TODOS", "TODAS", "ALL", "FROTA")
                 ]
+                # Últimas placas primeiro — eram as que mais falhavam (fim da lista/DOM)
+                vehicles = list(reversed(vehicles))
                 debug_session.step(
                     "frota_lista",
-                    f"Frota: {len(vehicles)} veículo(s) — 1 a 1 "
+                    f"Frota: {len(vehicles)} veículo(s) — 1 a 1, "
+                    f"ÚLTIMAS primeiro "
                     f"(reinicia Chrome a cada {RESTART_EVERY}): "
                     + ", ".join(v["placa"] for v in vehicles[:25]),
                     ok=True,
