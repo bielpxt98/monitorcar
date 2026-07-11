@@ -38,26 +38,17 @@ class Segment:
         return format_range(self.inicio, self.fim)
 
 
-IGNITION_ON_HINTS = (
-    "ignição ligada",
-    "ignicao ligada",
-    "ignição lig",
-    "ligada",
-    "normal",
-    "movimento",
-    "em movimento",
-    "in motion",
-    "ignition on",
-    "ignition on",
+# OFF/ON checados por regex (ordem importa: "desligada" contém "ligada")
+_IGNITION_OFF_RE = re.compile(
+    r"estacionado|parked|parado|ignition\s*off|"
+    r"igni[cç][aã]o\s+desligad|desligada|desligado",
+    re.I,
 )
-IGNITION_OFF_HINTS = (
-    "estacionado",
-    "desligada",
-    "ignição desligada",
-    "ignicao desligada",
-    "parado",
-    "parked",
-    "ignition off",
+_IGNITION_ON_RE = re.compile(
+    r"em\s+movimento|in\s+motion|(?<![a-z])movimento(?![a-z])|"
+    r"igni[cç][aã]o\s+ligada|ignition\s*on|"
+    r"(?<![a-z])normal(?![a-z])",
+    re.I,
 )
 
 
@@ -164,14 +155,22 @@ def extract_city(endereco: str, referencia: str = "") -> str:
 
 
 def is_ignition_on(modo: str) -> Optional[bool]:
-    m = (modo or "").lower()
-    if any(h in m for h in IGNITION_ON_HINTS) and "deslig" not in m:
-        if "estacionado" in m:
-            return False
-        return True
-    if any(h in m for h in IGNITION_OFF_HINTS):
+    """
+    True  = ignição ligada / em movimento
+    False = estacionado / ignição desligada
+    None  = modo desconhecido (ignora na transição)
+    """
+    m = (modo or "").strip()
+    if not m:
+        return None
+    # OFF antes de ON — "desligada" contém a substring "ligada"
+    if _IGNITION_OFF_RE.search(m):
         return False
-    if "alerta" in m and "igni" in m:
+    if _IGNITION_ON_RE.search(m):
+        return True
+    # Alerta de ignição ligada (sem deslig)
+    ml = m.lower()
+    if "alerta" in ml and "igni" in ml and "deslig" not in ml:
         return True
     return None
 
@@ -303,6 +302,14 @@ def build_segments(
 def find_ignition_events(
     positions: list[Position],
 ) -> tuple[Optional[datetime], Optional[datetime]]:
+    """
+    Ligou  = primeiro ponto com ignição ON (movimento / ignição ligada).
+    Desligou = momento da transição ON → OFF (primeiro Estacionado/desligada
+               depois de ter ligado) — NÃO o último registro do dia.
+
+    Antes o código sobrescrevia Desligou com o último ponto estacionado
+    (ex.: 07:39), colando no fim da lista em vez da hora real do desligue.
+    """
     ordered = sorted(
         [p for p in positions if p.when],
         key=lambda p: p.when,  # type: ignore[arg-type, return-value]
@@ -315,20 +322,20 @@ def find_ignition_events(
         state = is_ignition_on(pos.modo)
         if state is None:
             continue
-        if state and not prev_on:
+        if state is True:
             if ligou is None:
                 ligou = pos.when
-        if state is False and prev_on:
-            desligou = pos.when
-        if state is not None:
-            prev_on = state
+            prev_on = True
+        elif state is False:
+            # só conta desligue se já esteve ligado (evita "desligou" no 1º parked)
+            if prev_on is True and desligou is None:
+                desligou = pos.when
+            # se religar e desligar de novo no mesmo dia, guarda o ÚLTIMO desligue real
+            elif prev_on is True:
+                desligou = pos.when
+            prev_on = False
 
-    # Se terminou estacionado, marca desligamento no último ponto off
-    if ordered:
-        last = ordered[-1]
-        if is_ignition_on(last.modo) is False:
-            desligou = last.when
-
+    # NÃO usar o último registro do dia como desligou — isso colava no fim da lista
     return ligou, desligou
 
 
