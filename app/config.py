@@ -43,6 +43,12 @@ class Settings:
     sitrax_senha: str = os.getenv("SITRAX_SENHA", "")
     sitrax_headless: bool = _bool(os.getenv("SITRAX_HEADLESS"), True)
     port: int = int(os.getenv("PORT", "8000"))
+    # Login do site (cadeado) — sobrescreva no Railway se quiser
+    app_user: str = os.getenv("APP_USER", "izabel")
+    app_password: str = os.getenv("APP_PASSWORD", "2006")
+    session_secret: str = os.getenv(
+        "SESSION_SECRET", "monitorcar-resumo-rota-session-v1"
+    )
 
 
 settings = Settings()

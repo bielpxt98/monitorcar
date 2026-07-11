@@ -91,6 +91,7 @@ def _run_one_worker(
     keep_alive: bool = False,
     on_bot_replaced: Optional[Any] = None,
     start_barrier: Optional[threading.Barrier] = None,
+    cancel_check: Optional[Any] = None,
 ) -> list[PlateResult]:
     """Um Chrome processa sua fatia; preferência: bot permanente (keep_alive)."""
     import time as _time
@@ -99,6 +100,12 @@ def _run_one_worker(
     from app.bot.report import build_narrative_report, positions_from_rows
     from app.bot.summary_pdf import build_summary_pdf_bytes
     from app.bot import debug_session
+
+    def _cancelled() -> bool:
+        try:
+            return bool(cancel_check and cancel_check())
+        except Exception:
+            return False
 
     results: list[PlateResult] = []
     if not assigned:
@@ -201,6 +208,22 @@ def _run_one_worker(
                 logger.warning("Barreira worker %s: %s", worker_id + 1, e)
 
         for j, (order, v) in enumerate(assigned):
+            if _cancelled():
+                logger.info(
+                    "Worker %s: cancelado antes de %s (%s/%s)",
+                    worker_id + 1,
+                    v.get("placa"),
+                    j + 1,
+                    len(assigned),
+                )
+                debug_session.step(
+                    f"w{worker_id+1}_cancelado",
+                    f"Cancelado pelo usuário em {j}/{len(assigned)} placas",
+                    ok=False,
+                    screenshot=False,
+                )
+                break
+
             pl = v["placa"]
             with progress_lock:
                 progress[worker_id]["done"] = j
@@ -453,10 +476,12 @@ def run_fleet_parallel(
     existing_bots: Optional[list[tuple[int, Any]]] = None,
     keep_alive: bool = False,
     on_bot_replaced: Optional[Any] = None,
+    cancel_check: Optional[Any] = None,
 ) -> list[PlateResult]:
     """
-    2 Chromes em paralelo (round-robin).
+    1 Chrome sequencial (estável).
     existing_bots: bots permanentes [(id, bot), ...] — sem login de novo.
+    cancel_check: callable() -> bool — para entre placas se True.
     """
     from app.bot import debug_session
 
@@ -499,8 +524,9 @@ def run_fleet_parallel(
                 total_done += int(st.get("done") or 0)
                 pl = st.get("placa") or "…"
                 parts.append(f"C{wid+1}:{st.get('done', 0)}/{st.get('total', 0)} {pl}")
+            prefix = "Cancelando… " if (cancel_check and cancel_check()) else ""
             job_message_cb(
-                f"Frota {total_done}/{total} — " + " · ".join(parts)
+                f"{prefix}Frota {total_done}/{total} — " + " · ".join(parts)
             )
 
     # Largada simultânea: os N workers esperam uns aos outros e saem juntos
@@ -522,6 +548,7 @@ def run_fleet_parallel(
                 keep_alive,
                 on_bot_replaced,
                 start_barrier,
+                cancel_check,
             ): wid
             for wid, bucket in active
         }

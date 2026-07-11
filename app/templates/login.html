@@ -1,0 +1,151 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <meta name="theme-color" content="#0f1221" />
+  <title>Entrar — Resumo de Rota</title>
+  <style>
+    :root {
+      --bg: #0f1221;
+      --card: #1a1f35;
+      --accent: #ff6b00;
+      --text: #f3f4f6;
+      --muted: #9ca3af;
+      --err: #ef4444;
+      --border: #2d3548;
+    }
+    * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+    body {
+      margin: 0;
+      font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+      color: var(--text);
+      min-height: 100vh;
+      min-height: 100dvh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 1.25rem;
+      background: var(--bg);
+      position: relative;
+      isolation: isolate;
+    }
+    body::before {
+      content: "";
+      position: fixed;
+      inset: 0;
+      z-index: -2;
+      background: var(--bg) url("/static/bg-hero.jpg") center 20% / cover no-repeat;
+    }
+    body::after {
+      content: "";
+      position: fixed;
+      inset: 0;
+      z-index: -1;
+      background: linear-gradient(
+        180deg,
+        rgba(15,18,33,.55) 0%,
+        rgba(15,18,33,.78) 50%,
+        rgba(15,18,33,.92) 100%
+      );
+    }
+    .card {
+      width: 100%;
+      max-width: 380px;
+      background: rgba(26, 31, 53, 0.92);
+      border: 1px solid var(--border);
+      border-radius: 18px;
+      padding: 1.5rem 1.35rem 1.35rem;
+      box-shadow: 0 12px 40px rgba(0,0,0,.45);
+      backdrop-filter: blur(12px);
+    }
+    .lock {
+      width: 56px; height: 56px;
+      margin: 0 auto .9rem;
+      border-radius: 16px;
+      background: linear-gradient(145deg, rgba(255,107,0,.25), rgba(168,85,247,.2));
+      border: 1px solid rgba(255,107,0,.35);
+      display: flex; align-items: center; justify-content: center;
+      font-size: 1.6rem;
+    }
+    h1 {
+      margin: 0;
+      font-size: 1.25rem;
+      text-align: center;
+    }
+    .sub {
+      margin: .4rem 0 1.15rem;
+      text-align: center;
+      color: var(--muted);
+      font-size: .88rem;
+      line-height: 1.4;
+    }
+    label {
+      display: block;
+      font-size: .8rem;
+      color: var(--muted);
+      margin-bottom: .3rem;
+    }
+    input[type=text], input[type=password] {
+      width: 100%;
+      padding: .9rem .95rem;
+      border-radius: 12px;
+      border: 1px solid var(--border);
+      background: #0f1324;
+      color: var(--text);
+      font-size: 1rem;
+      margin-bottom: .85rem;
+    }
+    input:focus {
+      outline: none;
+      border-color: var(--accent);
+      box-shadow: 0 0 0 3px rgba(255,107,0,.15);
+    }
+    button {
+      width: 100%;
+      border: 0;
+      border-radius: 12px;
+      padding: 1rem;
+      font-size: 1.05rem;
+      font-weight: 700;
+      color: #fff;
+      cursor: pointer;
+      background: linear-gradient(90deg, var(--accent), #ff8c33);
+      box-shadow: 0 8px 24px rgba(255,107,0,.35);
+      margin-top: .25rem;
+    }
+    button:active { transform: scale(.98); }
+    .err {
+      background: rgba(239,68,68,.1);
+      border: 1px solid rgba(239,68,68,.35);
+      color: #fecaca;
+      border-radius: 10px;
+      padding: .7rem .85rem;
+      font-size: .85rem;
+      margin-bottom: .9rem;
+    }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <div class="lock" aria-hidden="true">🔒</div>
+    <h1>Resumo de Rota</h1>
+    <p class="sub">Entre com usuário e senha para buscar no Sitrax.</p>
+
+    {% if error %}
+    <div class="err">{{ error }}</div>
+    {% endif %}
+
+    <form method="post" action="/login" autocomplete="username">
+      <input type="hidden" name="next" value="{{ next or '/' }}" />
+      <label for="usuario">Usuário</label>
+      <input id="usuario" name="usuario" type="text" required autofocus
+             autocapitalize="none" autocomplete="username" />
+      <label for="senha">Senha</label>
+      <input id="senha" name="senha" type="password" required
+             autocomplete="current-password" />
+      <button type="submit">Desbloquear</button>
+    </form>
+  </div>
+</body>
+</html>

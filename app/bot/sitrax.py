@@ -1701,99 +1701,313 @@ class SitraxBot:
         self._save_debug(f"veiculo_ok_{placa_u}")
         return {"placa": placa_u}
 
+    def _read_date_chip_text(self) -> str:
+        """Texto do chip Data/Date na barra (não confunde com datas da tabela)."""
+        d = self._d()
+        best = ""
+        for el in d.find_elements(
+            By.XPATH,
+            "//*[contains(normalize-space(.),'Data:') or starts-with(normalize-space(.),'Data') "
+            "or contains(normalize-space(.),'Date:') or starts-with(normalize-space(.),'Date') "
+            "or contains(normalize-space(.),'Filtro Data') or contains(normalize-space(.),'Date filter')]",
+        ):
+            try:
+                if not el.is_displayed():
+                    continue
+                t = re.sub(r"\s+", " ", (el.text or "").strip())
+                if not t or not re.search(r"\d{2}/\d{2}/\d{4}", t):
+                    continue
+                if not ("Data" in t or "Date" in t):
+                    continue
+                # chip compacto da barra; evita blocos enormes
+                if len(t) > 120:
+                    continue
+                h = el.size.get("height", 99) or 99
+                if h < 80:
+                    return t
+                if not best or len(t) < len(best):
+                    best = t
+            except Exception:
+                continue
+        return best
+
+    def _date_chip_matches(self, data_ini: date, data_fim: date) -> bool:
+        """True se o chip já reflete o período (início e fim)."""
+        chip = self._read_date_chip_text()
+        if not chip:
+            return False
+        dates = re.findall(r"\d{2}/\d{2}/\d{4}", chip)
+        if not dates:
+            return False
+        ini_br = data_ini.strftime("%d/%m/%Y")
+        fim_br = data_fim.strftime("%d/%m/%Y")
+        # 1 data no chip: só OK se início==fim e bate
+        if len(dates) == 1:
+            return data_ini == data_fim and dates[0] == ini_br
+        # 2+ datas: primeira e última (ou ambas presentes na ordem)
+        return dates[0] == ini_br and dates[-1] == fim_br
+
+    def _fill_date_popup(self, ini_br: str, fim_br: str) -> bool:
+        """Preenche Início/Fim no popup Filtro Data. Retorna True se preencheu algo."""
+        d = self._d()
+        filled_ini = False
+        filled_fim = False
+
+        def _set_input(inp, value: str) -> bool:
+            try:
+                d.execute_script(
+                    """
+                    var el = arguments[0], v = arguments[1];
+                    el.focus();
+                    el.value = '';
+                    el.value = v;
+                    el.dispatchEvent(new Event('input', {bubbles:true}));
+                    el.dispatchEvent(new Event('change', {bubbles:true}));
+                    el.dispatchEvent(new Event('blur', {bubbles:true}));
+                    """,
+                    inp,
+                    value,
+                )
+                # JSF / calendário às vezes exige teclado
+                try:
+                    inp.clear()
+                except Exception:
+                    pass
+                try:
+                    inp.send_keys(value)
+                except Exception:
+                    pass
+                return True
+            except Exception:
+                return False
+
+        # 1) inputs rotulados Início / Fim (PT ou EN)
+        label_map = [
+            (("início", "inicio", "start", "from", "de"), "ini"),
+            (("fim", "end", "to", "até", "ate"), "fim"),
+        ]
+        for inp in d.find_elements(By.CSS_SELECTOR, "input"):
+            try:
+                if not inp.is_displayed():
+                    continue
+            except Exception:
+                continue
+            meta = " ".join(
+                [
+                    (inp.get_attribute("id") or ""),
+                    (inp.get_attribute("name") or ""),
+                    (inp.get_attribute("placeholder") or ""),
+                    (inp.get_attribute("aria-label") or ""),
+                    (inp.get_attribute("title") or ""),
+                ]
+            ).lower()
+            # label associado
+            try:
+                iid = inp.get_attribute("id") or ""
+                if iid:
+                    for lab in d.find_elements(
+                        By.XPATH, f"//label[@for='{iid}']"
+                    ):
+                        meta += " " + (lab.text or "").lower()
+            except Exception:
+                pass
+            try:
+                parent = inp.find_element(By.XPATH, "./ancestor::*[self::div or self::td or self::label][1]")
+                meta += " " + (parent.text or "")[:80].lower()
+            except Exception:
+                pass
+
+            kind = None
+            for keys, k in label_map:
+                if any(x in meta for x in keys):
+                    kind = k
+                    break
+            if kind == "ini" and not filled_ini:
+                filled_ini = _set_input(inp, f"{ini_br} 00:00:00") or filled_ini
+            elif kind == "fim" and not filled_fim:
+                filled_fim = _set_input(inp, f"{fim_br} 23:59:59") or filled_fim
+
+        # 2) fallback: 2 primeiros inputs de data visíveis no popup
+        if not (filled_ini and filled_fim):
+            date_like = []
+            for inp in d.find_elements(By.CSS_SELECTOR, "input"):
+                try:
+                    if not inp.is_displayed():
+                        continue
+                    typ = (inp.get_attribute("type") or "text").lower()
+                    val = inp.get_attribute("value") or ""
+                    ph = (inp.get_attribute("placeholder") or "").lower()
+                    if typ in ("text", "date", "datetime-local", "tel"):
+                        if (
+                            re.search(r"\d{2}/\d{2}/\d{4}", val)
+                            or "data" in ph
+                            or "date" in ph
+                            or "/" in ph
+                            or typ.startswith("date")
+                            or not val
+                        ):
+                            date_like.append(inp)
+                except Exception:
+                    continue
+            if len(date_like) >= 1 and not filled_ini:
+                filled_ini = _set_input(date_like[0], f"{ini_br} 00:00:00")
+            if len(date_like) >= 2 and not filled_fim:
+                filled_fim = _set_input(date_like[1], f"{fim_br} 23:59:59")
+
+        # Botão Filtrar / Filter / Aplicar DENTRO do popup de data
+        clicked = False
+        for el in d.find_elements(
+            By.XPATH,
+            "//button[normalize-space()='Filtrar' or normalize-space()='Filter' "
+            "or normalize-space()='Aplicar' or normalize-space()='Apply' "
+            "or normalize-space()='OK' or normalize-space()='Ok'] | "
+            "//a[normalize-space()='Filtrar' or normalize-space()='Filter'] | "
+            "//input[@type='button' or @type='submit']",
+        ):
+            try:
+                if not el.is_displayed():
+                    continue
+                txt = (el.text or el.get_attribute("value") or "").strip().lower()
+                if txt and txt not in (
+                    "filtrar",
+                    "filter",
+                    "aplicar",
+                    "apply",
+                    "ok",
+                ):
+                    continue
+                # preferir botão dentro de área de data
+                try:
+                    anc = el.find_element(
+                        By.XPATH,
+                        "./ancestor::*[contains(.,'Filtro Data') or contains(.,'Date Filter') "
+                        "or contains(.,'Filtro data')][1]",
+                    )
+                    if anc:
+                        self._click(el)
+                        clicked = True
+                        break
+                except Exception:
+                    pass
+                if not clicked and txt in ("filtrar", "filter", "aplicar", "apply", "ok"):
+                    self._click(el)
+                    clicked = True
+                    break
+            except Exception:
+                continue
+
+        return bool(filled_ini or filled_fim or clicked)
+
     def set_date_filter(
         self,
         data_ini: Optional[date] = None,
         data_fim: Optional[date] = None,
     ) -> None:
         """
-        Ajusta a data só se for necessário.
-        No Sitrax o filtro é um chip 'Data: ...' — NÃO clicar nele
-        se a data do dia já estiver correta (evita abrir popup no lugar de Veículo).
+        Ajusta o chip Data/Date para o período (início→fim).
+        Só confia no texto do CHIP (não no body inteiro — datas da tabela enganam).
+        Tenta até 2 vezes se o chip não confirmar o período.
         """
         d = self._d()
         data_ini = data_ini or date.today()
-        data_fim = data_fim or date.today()
+        data_fim = data_fim or data_ini
+        if data_fim < data_ini:
+            data_ini, data_fim = data_fim, data_ini
         ini_br = data_ini.strftime("%d/%m/%Y")
         fim_br = data_fim.strftime("%d/%m/%Y")
 
         self._close_date_popup_if_open()
 
-        try:
-            body = d.find_element(By.TAG_NAME, "body").text
-        except Exception:
-            body = ""
-
-        # Se a barra já mostra o período desejado, não mexe (padrão: hoje)
-        if ini_br in body and fim_br in body:
-            logger.info("Data já está no filtro: %s → %s (sem clicar)", ini_br, fim_br)
+        if self._date_chip_matches(data_ini, data_fim):
+            logger.info(
+                "Data já no chip: %s → %s (sem clicar)", ini_br, fim_br
+            )
             return
 
-        # Precisa mudar: clica no chip de Data/Date (não em Veículo/Vehicle)
-        date_chip = None
-        for el in d.find_elements(
-            By.XPATH,
-            "//*[contains(normalize-space(.),'Data:') or starts-with(normalize-space(.),'Data') "
-            "or contains(normalize-space(.),'Date:') or starts-with(normalize-space(.),'Date')]",
-        ):
-            try:
-                if not el.is_displayed():
+        for attempt in range(1, 3):
+            self._close_date_popup_if_open()
+            date_chip = None
+            for el in d.find_elements(
+                By.XPATH,
+                "//*[contains(normalize-space(.),'Data:') or starts-with(normalize-space(.),'Data') "
+                "or contains(normalize-space(.),'Date:') or starts-with(normalize-space(.),'Date')]",
+            ):
+                try:
+                    if not el.is_displayed():
+                        continue
+                    t = (el.text or "").strip()
+                    if (
+                        ("Data" in t or "Date" in t)
+                        and re.search(r"\d{2}/\d{2}/\d{4}", t)
+                        and len(t) < 120
+                    ):
+                        h = el.size.get("height", 99) or 99
+                        if h < 80:
+                            date_chip = el
+                            break
+                        if date_chip is None:
+                            date_chip = el
+                except Exception:
                     continue
-                t = (el.text or "").strip()
-                if (
-                    ("Data" in t or "Date" in t)
-                    and re.search(r"\d{2}/\d{2}/\d{4}", t)
-                ):
-                    if el.size.get("height", 99) < 60:
-                        date_chip = el
-                        break
-                    if date_chip is None:
-                        date_chip = el
-            except Exception:
-                continue
 
-        if not date_chip:
-            logger.warning("Não achou chip de Data/Date; mantendo data atual do sistema")
-            return
+            if not date_chip:
+                # tenta via JS (headless às vezes esconde is_displayed)
+                try:
+                    clicked = d.execute_script(
+                        """
+                        var nodes = document.querySelectorAll('a,span,div,button,label');
+                        for (var i=0;i<nodes.length;i++){
+                          var t=(nodes[i].innerText||'').replace(/\\s+/g,' ').trim();
+                          if (t.length>100) continue;
+                          if (!/\\d{2}\\/\\d{2}\\/\\d{4}/.test(t)) continue;
+                          if (!(t.indexOf('Data')>=0 || t.indexOf('Date')>=0)) continue;
+                          nodes[i].click();
+                          return t;
+                        }
+                        return null;
+                        """
+                    )
+                    if not clicked:
+                        logger.warning(
+                            "Não achou chip de Data/Date; mantendo data atual"
+                        )
+                        return
+                    logger.info("Chip data via JS: %s", clicked)
+                except Exception as e:
+                    logger.warning("Chip data: %s", e)
+                    return
+            else:
+                self._click(date_chip)
 
-        self._click(date_chip)
-        self._sleep(0.6)
+            self._sleep(0.7)
+            ok_fill = self._fill_date_popup(ini_br, fim_br)
+            self._wait_loader_gone(20)
+            self._close_date_popup_if_open()
+            self._sleep(0.4)
 
-        # preenche Início / Fim no popup se houver inputs
-        inputs = d.find_elements(By.CSS_SELECTOR, "input")
-        visible_inputs = [i for i in inputs if i.is_displayed()]
-        filled = 0
-        for inp in visible_inputs:
-            try:
-                val = (inp.get_attribute("value") or "")
-                # preenche os dois primeiros campos de data do popup
-                if filled == 0:
-                    inp.clear()
-                    inp.send_keys(f"{ini_br} 00:00:00")
-                    filled = 1
-                elif filled == 1:
-                    inp.clear()
-                    inp.send_keys(f"{fim_br} 23:59:59")
-                    filled = 2
-                    break
-            except Exception:
-                continue
+            if self._date_chip_matches(data_ini, data_fim):
+                logger.info(
+                    "Data filtro OK (tentativa %s): %s → %s",
+                    attempt,
+                    ini_br,
+                    fim_br,
+                )
+                return
+            logger.warning(
+                "Data chip ainda errado após tentativa %s (fill=%s): chip=%r queria %s→%s",
+                attempt,
+                ok_fill,
+                self._read_date_chip_text(),
+                ini_br,
+                fim_br,
+            )
 
-        # Filtrar / Filter dentro do popup de data
-        for el in d.find_elements(
-            By.XPATH,
-            "//button[normalize-space()='Filtrar' or normalize-space()='Filter']",
-        ):
-            try:
-                if el.is_displayed():
-                    self._click(el)
-                    break
-            except Exception:
-                continue
-
-        self._wait_loader_gone(20)
-        self._close_date_popup_if_open()
-        logger.info("Data filtro ajustada: %s → %s", ini_br, fim_br)
+        logger.warning(
+            "Data filtro pode estar incompleta: chip=%r (pedido %s → %s)",
+            self._read_date_chip_text(),
+            ini_br,
+            fim_br,
+        )
 
     def click_filtrar(self) -> None:
         """Clica no botão laranja Filtrar/Filter da barra principal (não do modal)."""

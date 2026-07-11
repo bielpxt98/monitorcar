@@ -185,13 +185,37 @@
       width: 100%; border: 0; border-radius: 12px; padding: .75rem;
       background: #374151; color: #fff; font-weight: 600; cursor: pointer;
     }
+    .header-row {
+      display: flex; align-items: flex-start; justify-content: space-between;
+      gap: .75rem;
+    }
+    .btn-logout, .btn-cancel {
+      border: 1px solid var(--border); border-radius: 10px;
+      background: rgba(55,65,81,.55); color: var(--text);
+      font-size: .8rem; font-weight: 600; padding: .45rem .7rem;
+      cursor: pointer; text-decoration: none; white-space: nowrap;
+      display: inline-flex; align-items: center; gap: .3rem;
+    }
+    .btn-logout:hover { border-color: #9ca3af; }
+    .btn-cancel {
+      width: 100%; margin-top: .85rem; padding: .85rem;
+      border: 0; border-radius: 12px; font-size: 1rem; font-weight: 700;
+      background: linear-gradient(90deg, #b91c1c, #ef4444);
+      color: #fff; box-shadow: 0 6px 18px rgba(239,68,68,.28);
+    }
+    .btn-cancel:disabled { opacity: .55; cursor: wait; }
   </style>
 </head>
 <body>
   <div class="wrap">
     <header>
-      <h1>Resumo de Rota</h1>
-      <p>Prioridade: o servidor busca no Sitrax <strong>sozinho</strong> e devolve 1 PDF de resumo. Upload de PDF fica só como plano B.</p>
+      <div class="header-row">
+        <div>
+          <h1>Resumo de Rota</h1>
+          <p>Prioridade: o servidor busca no Sitrax <strong>sozinho</strong> e devolve 1 PDF de resumo. Upload de PDF fica só como plano B.</p>
+        </div>
+        <a class="btn-logout" href="/logout" title="Sair">🔒 Sair</a>
+      </div>
     </header>
 
     {% if job_running or job_msg or job_status %}
@@ -202,10 +226,21 @@
       </p>
       <p class="hint" id="job-live" style="margin:.5rem 0 0">{{ job_status }}</p>
       <p class="hint" style="margin:.65rem 0 0">
-        Frota roda em segundo plano (evita “upstream error”).
+        Pesquisa em segundo plano (evita “upstream error”).
         Acompanhe em <a href="/debug" style="color:#fdba74">/debug</a>.
         Esta página atualiza sozinha.
       </p>
+      {% if job_running %}
+      <form method="post" action="/cancelar" id="form-cancel"
+            onsubmit="var b=this.querySelector('button'); b.disabled=true; b.textContent='Cancelando…';">
+        <button type="submit" class="btn-cancel" id="btn-cancel">
+          ⏹ Cancelar pesquisa
+        </button>
+      </form>
+      <p class="hint" style="margin:.5rem 0 0">
+        Cancela após a placa atual. Use se demorar e quiser buscar outra placa.
+      </p>
+      {% endif %}
     </div>
     {% endif %}
 

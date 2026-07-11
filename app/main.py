@@ -1,14 +1,16 @@
 """
 Site mobile (nuvem):
-  - Login do app (opcional simples) / serviço no servidor
+  - Login do app (cadeado: usuário/senha)
   - Escolhe: 1 placa ou todos
   - Gera 1 PDF-resumo
   - PDFs brutos do Sitrax ficam só no TEMP do servidor e são apagados
+  - Cancelar pesquisa em andamento
 """
 
 from __future__ import annotations
 
 import logging
+import secrets
 import time
 import traceback
 from concurrent.futures import ThreadPoolExecutor
@@ -16,11 +18,13 @@ from contextlib import asynccontextmanager
 from datetime import date, datetime
 from pathlib import Path
 from typing import Optional
+from urllib.parse import quote
 
 from fastapi import FastAPI, File, Form, Request, UploadFile
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
+from starlette.middleware.sessions import SessionMiddleware
 
 from app.config import settings
 
@@ -33,6 +37,15 @@ logger = logging.getLogger("sitrax-bot")
 BASE = Path(__file__).resolve().parent
 executor = ThreadPoolExecutor(max_workers=1)  # 1 por vez no Chrome
 
+# rotas abertas sem login
+_PUBLIC_PREFIXES = (
+    "/login",
+    "/logout",
+    "/static",
+    "/health",
+    "/favicon.ico",
+)
+
 
 def sitrax_configured() -> bool:
     return bool(
@@ -40,10 +53,23 @@ def sitrax_configured() -> bool:
     )
 
 
+def is_logged_in(request: Request) -> bool:
+    return bool(request.session.get("auth_user"))
+
+
+def check_app_credentials(user: str, password: str) -> bool:
+    u = (user or "").strip()
+    p = password or ""
+    return (
+        secrets.compare_digest(u, settings.app_user)
+        and secrets.compare_digest(p, settings.app_password)
+    )
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """
-    Ao subir: 2 Chromes permanentes em Veículos + keeper que religa sozinho.
+    Ao subir: 1 Chrome permanente em Veículos + keeper que religa sozinho.
     Não precisa clicar em “Ligar” no /debug.
     """
     if sitrax_configured():
@@ -88,9 +114,53 @@ _JOB: dict = {
     "message": "",
     "error": "",
     "done": False,
+    "cancel": False,
 }
 # flash one-shot (POST /gerar → redirect /) para a URL voltar à home
 _FLASH: dict = {"error": None, "job_msg": None, "placa": None}
+
+
+def job_cancelled() -> bool:
+    return bool(_JOB.get("cancel"))
+
+
+@app.middleware("http")
+async def require_login(request: Request, call_next):
+    path = request.url.path or "/"
+    if any(path == p or path.startswith(p + "/") for p in _PUBLIC_PREFIXES):
+        return await call_next(request)
+    if path.startswith("/static"):
+        return await call_next(request)
+    if is_logged_in(request):
+        return await call_next(request)
+    # APIs JSON → 401
+    if path.startswith("/api/") or path in (
+        "/job-status",
+        "/warm/status",
+        "/baixar-resumo",
+    ):
+        return JSONResponse(
+            {"ok": False, "error": "Não autenticado. Faça login."},
+            status_code=401,
+        )
+    nxt = path
+    if request.url.query:
+        nxt = f"{path}?{request.url.query}"
+    return RedirectResponse(
+        url=f"/login?next={quote(nxt, safe='')}",
+        status_code=303,
+    )
+
+
+# SessionMiddleware por último = executa primeiro no request (sessão pronta no auth)
+app.add_middleware(
+    SessionMiddleware,
+    secret_key=settings.session_secret,
+    session_cookie="resumo_rota_sess",
+    max_age=60 * 60 * 24 * 14,  # 14 dias
+    same_site="lax",
+    https_only=False,
+)
 
 
 def _pop_flash() -> dict:
@@ -115,6 +185,50 @@ def parse_date(value: str) -> Optional[date]:
         except ValueError:
             continue
     return None
+
+
+@app.get("/login", response_class=HTMLResponse)
+async def login_page(request: Request, next: str = "/"):
+    if is_logged_in(request):
+        return RedirectResponse(url=next or "/", status_code=303)
+    return templates.TemplateResponse(
+        request,
+        "login.html",
+        {
+            "error": None,
+            "next": next or "/",
+        },
+    )
+
+
+@app.post("/login")
+async def login_submit(
+    request: Request,
+    usuario: str = Form(""),
+    senha: str = Form(""),
+    next: str = Form("/"),
+):
+    if check_app_credentials(usuario, senha):
+        request.session["auth_user"] = (usuario or "").strip()
+        dest = next if next and next.startswith("/") and not next.startswith("//") else "/"
+        logger.info("Login app OK: %s", request.session["auth_user"])
+        return RedirectResponse(url=dest, status_code=303)
+    return templates.TemplateResponse(
+        request,
+        "login.html",
+        {
+            "error": "Usuário ou senha incorretos.",
+            "next": next or "/",
+        },
+        status_code=401,
+    )
+
+
+@app.get("/logout")
+@app.post("/logout")
+async def logout(request: Request):
+    request.session.clear()
+    return RedirectResponse(url="/login", status_code=303)
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -158,6 +272,7 @@ async def home(request: Request):
             "job_running": bool(_JOB.get("running")),
             "job_status": _JOB.get("message") or "",
             "verify": verify,
+            "auth_user": request.session.get("auth_user") or "",
         },
     )
 
@@ -199,6 +314,9 @@ def _run_job(modo: str, placa: str, d_ini: date, d_fim: date):
     from pypdf import PdfWriter, PdfReader
     import io
 
+    if job_cancelled():
+        raise JobCancelled("Cancelado pelo usuário")
+
     debug_session.start_run(placa="FROTA")
     textos: list[str] = []
     pdf_writer = PdfWriter()
@@ -207,6 +325,8 @@ def _run_job(modo: str, placa: str, d_ini: date, d_fim: date):
 
     try:
         with TempWorkspace(prefix="sitrax_frota_") as tmp:
+            if job_cancelled():
+                raise JobCancelled("Cancelado pelo usuário")
             borrowed = warm_pool.borrow_for_fleet()
             _JOB["message"] = "Frota: listando placas (1 Chrome estável)…"
 
@@ -260,6 +380,7 @@ def _run_job(modo: str, placa: str, d_ini: date, d_fim: date):
                     existing_bots=borrowed,
                     keep_alive=True,
                     on_bot_replaced=_on_replaced,
+                    cancel_check=job_cancelled,
                 )
             finally:
                 # Devolve os 2 a Veículos (continuam ligados)
@@ -294,6 +415,27 @@ def _run_job(modo: str, placa: str, d_ini: date, d_fim: date):
                     textos.insert(0, "\n".join(lines_v))
             except Exception:
                 pass
+
+        if job_cancelled():
+            # devolve o que já coletou (parcial) e marca cancelado
+            if textos:
+                out = io.BytesIO()
+                if len(pdf_writer.pages) > 0:
+                    pdf_writer.write(out)
+                    pdf_b = out.getvalue()
+                else:
+                    pdf_b = build_summary_pdf_bytes("FROTA", [], data_ref=data_ref)
+                _store_result(
+                    ReportResult(
+                        placa="FROTA",
+                        data_ref=data_ref,
+                        texto="⏹ Cancelado.\n\n" + "\n\n".join(textos),
+                        pdf_bytes=pdf_b,
+                        pdf_filename=safe_filename("FROTA", data_ref),
+                        pontos=total_pontos,
+                    )
+                )
+            raise JobCancelled("Cancelado pelo usuário")
 
         out = io.BytesIO()
         if len(pdf_writer.pages) == 0:
@@ -396,6 +538,10 @@ def _store_result(result) -> None:
     )
 
 
+class JobCancelled(Exception):
+    """Pesquisa cancelada pelo usuário."""
+
+
 def _start_bg_job(modo: str, placa: str, d_ini: date, d_fim: date) -> bool:
     """Inicia job em background. False se já houver um rodando."""
     if _JOB.get("running"):
@@ -406,6 +552,7 @@ def _start_bg_job(modo: str, placa: str, d_ini: date, d_fim: date) -> bool:
             {
                 "running": True,
                 "done": False,
+                "cancel": False,
                 "error": "",
                 "modo": modo,
                 "placa": placa,
@@ -414,23 +561,74 @@ def _start_bg_job(modo: str, placa: str, d_ini: date, d_fim: date) -> bool:
             }
         )
         try:
+            if job_cancelled():
+                raise JobCancelled("Cancelado antes de iniciar")
             result = _run_job(modo, placa, d_ini, d_fim)
+            if job_cancelled():
+                _JOB["message"] = (
+                    "Pesquisa cancelada. Pode buscar outra placa."
+                )
+                _JOB["error"] = ""
+                _JOB["done"] = True
+                return
             _store_result(result)
             _JOB["message"] = (
                 f"Concluído — {result.placa} ({result.pontos} pontos). "
                 "Baixe o PDF na home."
             )
             _JOB["done"] = True
+        except JobCancelled as e:
+            logger.info("Job cancelado: %s", e)
+            _JOB["error"] = ""
+            _JOB["message"] = "Pesquisa cancelada. Pode buscar outra placa."
+            _JOB["done"] = True
+            try:
+                from app.bot.warm_pool import warm_pool
+
+                warm_pool.release_after_fleet()
+            except Exception:
+                pass
         except Exception as e:
-            logger.exception("Job background falhou")
-            _JOB["error"] = f"{type(e).__name__}: {e}"
-            _JOB["message"] = f"Erro: {e}"
+            if job_cancelled() or "cancelad" in str(e).lower():
+                logger.info("Job interrompido: %s", e)
+                _JOB["error"] = ""
+                _JOB["message"] = "Pesquisa cancelada. Pode buscar outra placa."
+            else:
+                logger.exception("Job background falhou")
+                _JOB["error"] = f"{type(e).__name__}: {e}"
+                _JOB["message"] = f"Erro: {e}"
             _JOB["done"] = True
         finally:
             _JOB["running"] = False
+            _JOB["cancel"] = False
 
     executor.submit(work)
     return True
+
+
+@app.post("/cancelar")
+async def cancelar_pesquisa(request: Request):
+    """Cancela a pesquisa em andamento para liberar e buscar outra placa."""
+    if not _JOB.get("running"):
+        _FLASH["job_msg"] = "Nenhuma pesquisa em andamento."
+        return RedirectResponse(url="/", status_code=303)
+    _JOB["cancel"] = True
+    _JOB["message"] = "Cancelando… aguarde a placa atual terminar."
+    logger.info("Cancelamento pedido pelo usuário (job desde %s)", _JOB.get("started"))
+    _FLASH["job_msg"] = (
+        "Cancelamento pedido. Assim que a placa atual terminar, "
+        "a pesquisa para e você pode buscar outra."
+    )
+    return RedirectResponse(url="/", status_code=303)
+
+
+@app.post("/api/cancelar")
+async def api_cancelar():
+    if not _JOB.get("running"):
+        return {"ok": False, "error": "Nenhuma pesquisa em andamento"}
+    _JOB["cancel"] = True
+    _JOB["message"] = "Cancelando… aguarde a placa atual terminar."
+    return {"ok": True, "message": _JOB["message"]}
 
 
 @app.post("/gerar")
@@ -442,11 +640,9 @@ async def gerar(
     data_fim: str = Form(""),
 ):
     """
-    1 placa: espera o resultado e redireciona para / (home).
-    Todos (frota): BACKGROUND e redireciona para / — evita ficar em /gerar.
+    1 placa ou frota: roda em BACKGROUND e redireciona para / —
+    evita upstream error e permite Cancelar.
     """
-    import asyncio
-
     error = None
     job_msg = None
     placa_u = (placa or "").strip().upper()
@@ -462,34 +658,28 @@ async def gerar(
         if placa_u in ("TODOS", "TODAS", "ALL", "FROTA", "*"):
             modo_n = "todos"
 
-        if modo_n == "todos":
-            if _JOB.get("running"):
-                job_msg = (
-                    f"Já há um job em andamento desde {_JOB.get('started')}: "
-                    f"{_JOB.get('message')}. Acompanhe em /debug."
-                )
-            else:
-                ok = _start_bg_job("todos", placa, d_ini, d_fim)
-                if ok:
+        if _JOB.get("running"):
+            job_msg = (
+                f"Já há uma pesquisa em andamento desde {_JOB.get('started')}: "
+                f"{_JOB.get('message')}. Use Cancelar para parar e buscar outra."
+            )
+        else:
+            ok = _start_bg_job(modo_n, placa, d_ini, d_fim)
+            if ok:
+                if modo_n == "todos":
                     job_msg = (
-                        "Frota iniciada em segundo plano (evita erro upstream). "
-                        "Acompanhe os passos em Calibração (/debug). "
-                        "Quando terminar, baixe o PDF do resumo aqui. "
-                        "A página atualiza sozinha a cada 15s."
+                        "Frota iniciada em segundo plano. "
+                        "Acompanhe em /debug. Pode cancelar a qualquer momento "
+                        "para buscar outra placa. A página atualiza sozinha."
                     )
                 else:
-                    job_msg = "Não foi possível iniciar o job (ocupado)."
-        else:
-            loop = asyncio.get_event_loop()
-            try:
-                result = await loop.run_in_executor(
-                    executor,
-                    lambda: _run_job("placa", placa, d_ini, d_fim),
-                )
-                _store_result(result)
-            except Exception as e:
-                logger.exception("Erro ao gerar")
-                error = f"{type(e).__name__}: {e}"
+                    job_msg = (
+                        f"Buscando {placa_u or 'placa'}… "
+                        "Pode cancelar se demorar e buscar outra. "
+                        "A página atualiza sozinha."
+                    )
+            else:
+                job_msg = "Não foi possível iniciar a pesquisa (ocupado)."
 
     _FLASH["error"] = error
     _FLASH["job_msg"] = job_msg
@@ -541,6 +731,7 @@ async def job_status():
     return {
         "running": bool(_JOB.get("running")),
         "done": bool(_JOB.get("done")),
+        "cancel": bool(_JOB.get("cancel")),
         "message": _JOB.get("message") or "",
         "error": _JOB.get("error") or "",
         "has_pdf": bool(_LAST_REPORT.get("pdf_bytes")),
