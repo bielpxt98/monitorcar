@@ -1799,16 +1799,20 @@ class SitraxBot:
             chip = d.execute_script(
                 self._js_is_purple()
                 + """
-                // 1) regex no body (mais confiável após AJAX)
+                // 1) regex no body (PT: "Data: 11/07/2026 00:00:00 Até 11/07/2026 23:59:59")
                 var body = (document.body && document.body.innerText) || '';
                 var m = body.match(
-                  /(?:Date|Data)\\s*:\\s*(\\d{2}\\/\\d{2}\\/\\d{4})[^\\n]{0,50}?(?:Until|At[eé])\\s*(\\d{2}\\/\\d{2}\\/\\d{4})/i
+                  /(?:Date|Data)\\s*:\\s*(\\d{2}\\/\\d{2}\\/\\d{4})[^\\n]{0,80}?(?:Until|At[eé]|ate)\\s*(\\d{2}\\/\\d{2}\\/\\d{4})/i
+                );
+                if (m) return 'Date: ' + m[1] + ' Until ' + m[2];
+                // duas datas DD/MM/YYYY no chip (com ou sem hora)
+                m = body.match(
+                  /(?:Date|Data)\\s*:\\s*(\\d{2}\\/\\d{2}\\/\\d{4})(?:\\s+\\d{2}:\\d{2}(?::\\d{2})?)?[^\\n]{0,40}?(\\d{2}\\/\\d{2}\\/\\d{4})/i
                 );
                 if (m) return 'Date: ' + m[1] + ' Until ' + m[2];
                 m = body.match(/(?:Date|Data)\\s*:\\s*(\\d{2}\\/\\d{2}\\/\\d{4})\\s+\\d{2}:\\d{2}/i);
                 if (m) {
-                  // pode ter 2 datas no mesmo trecho
-                  var chunk = body.substring(body.indexOf(m[0]), body.indexOf(m[0])+80);
+                  var chunk = body.substring(body.indexOf(m[0]), body.indexOf(m[0])+100);
                   var ds = chunk.match(/\\d{2}\\/\\d{2}\\/\\d{4}/g) || [];
                   if (ds.length >= 2) return 'Date: ' + ds[0] + ' Until ' + ds[ds.length-1];
                   return 'Date: ' + m[1];
@@ -3494,8 +3498,13 @@ class SitraxBot:
                     f"{ini_br}→{fim_br} chip={chip_now!r} filter_clicked=1",
                     shot=False,
                 )
-                # Se a grade JÁ tem dados (Filter do popup aplicou),
-                # NÃO clica Filter da barra de novo (evita tab crash com 2000+ linhas)
+                # SEMPRE espera a grade após Filter Date (pode demorar 5–15s).
+                # Só re-clica Filter da barra se AINDA estiver vazia depois.
+                n_regs = self.wait_after_filter(
+                    min_sec=4.0,
+                    timeout=32.0,
+                    data_ini=data_ini,
+                )
                 try:
                     n_now = self.count_sitrax_registers()
                 except Exception:
@@ -3505,21 +3514,18 @@ class SitraxBot:
                     has_rows = self.grid_has_data_rows()
                 except Exception:
                     pass
-                # n_now>20 OU linhas com data GPS (contador às vezes falha no EN)
-                if (n_now is not None and n_now > 20) or has_rows:
+                if n_regs <= 0 and n_now > 0:
+                    n_regs = n_now
+                if n_regs <= 0 and has_rows:
+                    n_regs = n_now if n_now > 0 else 50
+
+                if n_regs > 0 or has_rows:
                     logger.info(
-                        "Grade já com dados após Filter Date "
-                        "(count=%s rows=%s) — só espera estabilizar",
-                        n_now,
+                        "Grade OK após Filter Date (count=%s rows=%s) "
+                        "— sem re-Filter barra",
+                        n_regs,
                         has_rows,
                     )
-                    n_regs = self.wait_after_filter(
-                        min_sec=3.0,
-                        timeout=22.0,
-                        data_ini=data_ini,
-                    )
-                    if n_regs <= 0 and has_rows:
-                        n_regs = n_now if (n_now and n_now > 0) else 50
                     self._trace(
                         "data_apos_filter_grade",
                         f"Showing={n_regs} (sem re-Filter barra) "
@@ -3527,25 +3533,30 @@ class SitraxBot:
                         shot=False,
                     )
                 else:
-                    # Filter da BARRA só se a grade ainda não atualizou
+                    # Grade ainda vazia: 1× Filter da barra e espera de novo
                     try:
                         self._trace(
                             f"data_antes_filter_barra_{attempt}",
-                            "Clicando Filter da barra (laranja)",
+                            "Grade vazia após espera — Filter da barra (laranja)",
                             shot=False,
                         )
                         self.click_filtrar()
                         n_regs = self.wait_after_filter(
-                            min_sec=3.2,
-                            timeout=28.0,
+                            min_sec=4.0,
+                            timeout=30.0,
                             data_ini=data_ini,
                         )
+                        n_now = self.count_sitrax_registers()
+                        has_rows = self.grid_has_data_rows()
+                        if n_regs <= 0 and (n_now > 0 or has_rows):
+                            n_regs = n_now if n_now > 0 else 50
                         logger.info(
                             "Após data+Filter barra: Showing=%s", n_regs
                         )
                         self._trace(
                             "data_apos_filter_grade",
-                            f"Showing={n_regs} após período {ini_br}→{fim_br}",
+                            f"Showing={n_regs} após barra {ini_br}→{fim_br} "
+                            f"has_rows={has_rows}",
                             shot=False,
                         )
                     except Exception as e:
@@ -4143,19 +4154,26 @@ class SitraxBot:
 
         self.set_date_filter(data_ini, data_fim)
 
-        # Se a grade JÁ carregou (ex.: Showing=2397), NÃO re-seleciona veículo
+        # Se a grade JÁ carregou (ex.: Showing=1226), NÃO re-seleciona veículo
         # nem re-Filter — isso derruba o Chrome (tab crash).
         try:
             n = self.count_sitrax_registers()
         except Exception:
             n = -1
-        if n is not None and n > 20:
+        has_rows = False
+        try:
+            has_rows = self.grid_has_data_rows()
+        except Exception:
+            pass
+        if (n is not None and n > 0) or has_rows:
             logger.info(
-                "prepare_warm: grade pronta com %s regs — segue scrape", n
+                "prepare_warm: grade pronta com %s regs (rows=%s) — segue scrape",
+                n,
+                has_rows,
             )
             self._trace(
                 "prepare_grade_pronta",
-                f"Showing={n} após data — sem re-Filter/modal",
+                f"Showing={n} has_rows={has_rows} após data — sem re-Filter/modal",
                 shot=False,
             )
             return
@@ -4345,23 +4363,26 @@ class SitraxBot:
                 """
                 function parseTotal(text) {
                   if (!text) return -1;
-                  // DataTables EN/PT: "... of 2,397 entries" / "... de 2.397 ..."
-                  var m = text.match(
-                    /(?:Showing|Mostrando)[\\s\\S]{0,60}?\\b(?:of|de)\\s+([\\d.,\\s]+)/i
+                  // PT Sitrax: "Mostrando: 1226 Registro(s)" — PRIORIDADE (colon)
+                  var m = text.match(/Mostrando\\s*:\\s*([\\d.,]+)\\s*Registro/i)
+                       || text.match(/Showing\\s*:\\s*([\\d.,]+)\\s*Register/i)
+                       || text.match(/Mostrando\\s*:\\s*([\\d.,]+)/i)
+                       || text.match(/Showing\\s*:\\s*([\\d.,]+)/i);
+                  if (m) {
+                    var d0 = String(m[1]).replace(/[^\\d]/g, '');
+                    if (d0) return parseInt(d0, 10);
+                  }
+                  // DataTables EN/PT: "Showing 1 to 50 of 2,397 entries"
+                  // Cuidado: NÃO usar \\bde no body inteiro (pega "de 11/07" errado)
+                  m = text.match(
+                    /(?:Showing|Mostrando)\\s+\\d+\\s+(?:to|a|–|-)\\s+\\d+\\s+(?:of|de)\\s+([\\d.,\\s]+)/i
                   );
                   if (m) {
                     var digits = String(m[1]).replace(/[^\\d]/g, '');
                     if (digits) return parseInt(digits, 10);
                   }
-                  // "Showing: 2397" / "Mostrando: 2397"
-                  m = text.match(/Mostrando\\s*:\\s*([\\d.,]+)/i)
-                   || text.match(/Showing\\s*:\\s*([\\d.,]+)/i);
-                  if (m) {
-                    var d2 = String(m[1]).replace(/[^\\d]/g, '');
-                    if (d2) return parseInt(d2, 10);
-                  }
-                  m = text.match(/([\\d.,]+)\\s*Registro\\(s\\)/i)
-                   || text.match(/([\\d.,]+)\\s*Register\\(s\\)/i)
+                  m = text.match(/([\\d.,]+)\\s*Registro\\(?s?\\)?/i)
+                   || text.match(/([\\d.,]+)\\s*Register\\(?s?\\)?/i)
                    || text.match(/([\\d.,]+)\\s*entries/i);
                   if (m) {
                     var d3 = String(m[1]).replace(/[^\\d]/g, '');
@@ -4369,16 +4390,25 @@ class SitraxBot:
                   }
                   return -1;
                 }
-                // Prefer o info do DataTables (evita lixo do body)
+                // Prefer o info do DataTables / rodapé Sitrax
                 var infos = document.querySelectorAll(
-                  '.dataTables_info, [id$="_info"], .dataTables_wrapper .dataTables_info'
+                  '.dataTables_info, [id$="_info"], .dataTables_wrapper .dataTables_info, '
+                  + '.dataTables_scrollFoot, .dataTables_wrapper'
                 );
                 for (var i = 0; i < infos.length; i++) {
                   var t = (infos[i].innerText || infos[i].textContent || '').trim();
+                  if (!/Mostrando|Showing|Registro|Register|entries/i.test(t)) continue;
                   var n = parseTotal(t);
                   if (n >= 0) return n;
                 }
+                // só um pedaço do body (evita lixo)
                 var body = ((document.body && document.body.innerText) || '');
+                var idx = body.search(/Mostrando\\s*:|Showing\\s+\\d|Showing\\s*:/i);
+                if (idx >= 0) {
+                  var slice = body.substring(idx, idx + 120);
+                  var ns = parseTotal(slice);
+                  if (ns >= 0) return ns;
+                }
                 return parseTotal(body);
                 """
             )
@@ -4426,25 +4456,34 @@ class SitraxBot:
             self._sleep(min_sec - elapsed)
             logger.info("Aguardou %.1fs pós-Filter (mínimo %.1fs)", min_sec, min_sec)
 
-        end = time.time() + max(8.0, timeout - min_sec)
+        end = time.time() + max(10.0, timeout - min_sec)
         last_n = -1
         stable = 0
+        # Só aceita "0 real" depois de esperar o mínimo + folga (grade demora)
+        zero_ok_after = t0 + min_sec + 5.0
         while time.time() < end:
-            if self.sitrax_says_no_records() or self.showing_zero_records():
+            if time.time() >= zero_ok_after and (
+                self.sitrax_says_no_records() or self.showing_zero_records()
+            ):
                 n0 = self.count_sitrax_registers()
-                if n0 == 0:
-                    self._sleep(0.8)
-                    if self.count_sitrax_registers() == 0 and not self.grid_has_data_rows():
+                if n0 == 0 and not self.grid_has_data_rows():
+                    self._sleep(1.0)
+                    if (
+                        self.count_sitrax_registers() == 0
+                        and not self.grid_has_data_rows()
+                    ):
+                        logger.info(
+                            "Pós-Filter 0 confirmado (%.1fs)", time.time() - t0
+                        )
                         return 0
             n = self.count_sitrax_registers()
             if n < 0:
-                # Contador não leu (ex.: EN "Showing 1 to 50 of 2,397")
-                # mas a grade tem linhas → trata como dados presentes
+                # Contador não leu mas a grade tem linhas → dados presentes
                 if self.grid_has_data_rows():
                     n = max(last_n, 50) if last_n > 0 else 50
                 else:
                     n = -1
-            if n >= 0 and n == last_n and n > 0:
+            if n > 0 and n == last_n:
                 stable += 1
                 if stable >= 2:  # mesmo N em 2 leituras (~1s)
                     logger.info(
@@ -4460,6 +4499,8 @@ class SitraxBot:
         final = self.count_sitrax_registers()
         if final < 0 and self.grid_has_data_rows():
             final = last_n if last_n > 0 else 50
+        if final <= 0 and self.grid_has_data_rows():
+            final = 50
         logger.info(
             "Pós-Filter timeout: Showing=%s (%.1fs)",
             final,
@@ -4611,7 +4652,14 @@ class SitraxBot:
                 n_ready = -1
 
             chip_ok = self.vehicle_chip_has_plate(placa_u)
-            if n_ready is not None and n_ready > 20:
+            has_ready_rows = False
+            try:
+                has_ready_rows = self.grid_has_data_rows()
+            except Exception:
+                pass
+            if (n_ready is not None and n_ready > 0) or has_ready_rows:
+                if n_ready is None or n_ready < 0:
+                    n_ready = 50 if has_ready_rows else 0
                 logger.info(
                     "fetch %s: grade já com %s — scrape direto",
                     placa_u,
@@ -4619,7 +4667,8 @@ class SitraxBot:
                 )
                 self._trace(
                     f"scrape_direto_{placa_u}",
-                    f"Showing={n_ready} — sem re-Filter (evita crash)",
+                    f"Showing={n_ready} has_rows={has_ready_rows} "
+                    f"— sem re-Filter (evita crash)",
                     shot=False,
                 )
                 n_hint = n_ready
@@ -4676,35 +4725,52 @@ class SitraxBot:
             last_rows = rows or []
             n_scrape = len(last_rows)
 
-            # Zero REAL só com confirmação explícita do Sitrax — NÃO use n_hint==0
-            zero_real = self.sitrax_says_no_records() or self.showing_zero_records()
+            # Contagem oficial + linhas na grade
             site_n = self.count_sitrax_registers()
+            has_grid = self.grid_has_data_rows()
+            # Zero REAL só com rodapé 0 + msg explícita + SEM linhas na grade
+            zero_real = (
+                site_n == 0
+                and not has_grid
+                and (
+                    self.sitrax_says_no_records()
+                    or self.showing_zero_records()
+                )
+            )
 
             logger.info(
-                "Frota %s tentativa %s: chip=%s grid~%s scrape=%s site=%s zero_real=%s",
+                "Frota %s tentativa %s: chip=%s grid~%s scrape=%s site=%s "
+                "has_grid=%s zero_real=%s",
                 placa_u,
                 attempt + 1,
                 chip_ok,
                 n_hint,
                 n_scrape,
                 site_n,
+                has_grid,
                 zero_real,
             )
 
-            # Sucesso se leu dados — mesmo sem chip confirmado (timing)
-            if n_scrape > 0 or (site_n is not None and site_n > 0 and self.grid_has_data_rows()):
-                if n_scrape == 0 and self.grid_has_data_rows():
-                    self.try_scroll_all()
+            # Se o site tem N>0 mas scrape 0 → tenta scrape de novo (NÃO é zero)
+            if n_scrape == 0 and (has_grid or (site_n is not None and site_n > 0)):
+                self._sleep(0.5)
+                self.try_scroll_all()
+                try:
                     last_rows = self.scrape_positions_table() or []
-                    n_scrape = len(last_rows)
-                if n_scrape > 0:
-                    self._trace(
-                        f"frota_rows_{placa_u}",
-                        f"{n_scrape} linha(s) scrapadas (hint grid {n_hint}"
-                        f"{', chip lento' if not chip_ok else ''})",
-                        ok=True,
-                    )
-                    return last_rows
+                except Exception as e:
+                    logger.warning("re-scrape: %s", e)
+                    last_rows = []
+                n_scrape = len(last_rows)
+
+            # Sucesso se leu dados
+            if n_scrape > 0:
+                self._trace(
+                    f"frota_rows_{placa_u}",
+                    f"{n_scrape} linha(s) scrapadas (site={site_n}"
+                    f"{', chip lento' if not chip_ok else ''})",
+                    ok=True,
+                )
+                return last_rows
 
             # Sitrax mostrou explicitamente 0 → OK, sem retry
             if zero_real and (chip_ok or self.vehicle_chip_has_plate(placa_u)):
@@ -4716,11 +4782,12 @@ class SitraxBot:
                 )
                 return []
 
-            # Grade com dados mas scrape vazio → retry
-            if attempt == 0 and (self.grid_has_data_rows() or n_hint > 0 or (site_n or 0) > 0):
+            # site com dados / grade com linhas / scrape vazio → retry
+            if attempt == 0 and (has_grid or n_hint > 0 or (site_n or 0) > 0):
                 self._trace(
                     f"frota_scrape_miss_{placa_u}",
-                    f"{placa_u}: há indício de dados (grid~{n_hint}) mas scrape 0 — retry",
+                    f"{placa_u}: site={site_n} has_grid={has_grid} "
+                    f"scrape 0 — retry",
                     ok=False,
                 )
                 continue
