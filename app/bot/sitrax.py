@@ -2479,14 +2479,12 @@ class SitraxBot:
         data_fim: Optional[date] = None,
     ) -> None:
         """
-        Fluxo Sitrax (como o usuário mostrou com o mouse):
-          1) Clica o chip ROXO da barra (Data: … Até … / Date: … Until …)
-          2) Abre popup Filtro Data
-          3) Clica a 1ª data roxa (Início) → abre calendário
-          4) Clica dia início no calendário, depois dia fim (2ª data)
-          5) Clica Filtrar do popup
+        Ajusta o filtro de data do Sitrax.
+
+        - Mesmo dia (início == fim): comportamento de antes — se o chip
+          já está nesse dia, NÃO mexe; só altera se precisar (1 dia no calendário).
+        - Dias diferentes: fluxo completo (chip roxo → Início → dia1 → dia2 → Filtrar).
         """
-        d = self._d()
         data_ini = data_ini or date.today()
         data_fim = data_fim or data_ini
         if data_fim < data_ini:
@@ -2496,10 +2494,40 @@ class SitraxBot:
 
         self._close_date_popup_if_open()
 
+        # Já está certo no chip → não clica em nada (mesmo dia ou período)
         if self._date_chip_matches(data_ini, data_fim):
-            logger.info("Data já no chip: %s → %s", ini_br, fim_br)
+            logger.info("Data já no chip: %s → %s (sem mexer)", ini_br, fim_br)
             self._trace("data_ja_ok", f"{ini_br} → {fim_br}", shot=False)
             return
+
+        multi_day = data_ini != data_fim
+        if multi_day:
+            logger.info(
+                "Período multi-dia %s → %s — fluxo calendário completo",
+                ini_br,
+                fim_br,
+            )
+            self._set_date_filter_via_calendar(data_ini, data_fim, multi_day=True)
+        else:
+            logger.info(
+                "Mesmo dia %s — fluxo simples (só se chip diferente)",
+                ini_br,
+            )
+            self._set_date_filter_via_calendar(data_ini, data_fim, multi_day=False)
+
+    def _set_date_filter_via_calendar(
+        self,
+        data_ini: date,
+        data_fim: date,
+        multi_day: bool = True,
+    ) -> None:
+        """
+        multi_day=True: clica dia início e dia fim no calendário.
+        multi_day=False: só um dia (mesmo comando simples de um período único).
+        """
+        d = self._d()
+        ini_br = data_ini.strftime("%d/%m/%Y")
+        fim_br = data_fim.strftime("%d/%m/%Y")
 
         for attempt in range(1, 4):
             self._close_date_popup_if_open()
@@ -2532,7 +2560,7 @@ class SitraxBot:
             if not opened:
                 continue
 
-            # 2) clica a 1ª data roxa (Início: 10/07/2026 00:00:00)
+            # 2) clica a 1ª data roxa (Início)
             ok_ini = self._click_popup_purple_date("ini")
             if not ok_ini:
                 ok_ini = self._click_written_date_inicio()
@@ -2548,59 +2576,57 @@ class SitraxBot:
                 self._sleep(0.25)
             self._save_debug(f"data_calendario_{attempt}")
 
-            # 3) no calendário: 1º dia, depois 2º dia
+            # 3) calendário
             if self._calendar_visible():
-                ok_cal = self._select_range_on_calendar(data_ini, data_fim)
-                logger.info(
-                    "Calendário dias %s→%s: %s", ini_br, fim_br, ok_cal
-                )
+                if multi_day:
+                    # período: 1º dia + 2º dia
+                    ok_cal = self._select_range_on_calendar(data_ini, data_fim)
+                    logger.info(
+                        "Calendário multi-dia %s→%s: %s", ini_br, fim_br, ok_cal
+                    )
+                else:
+                    # mesmo dia: só clica o dia (1x ou 2x no mesmo)
+                    ok_cal = self._select_range_on_calendar(data_ini, data_ini)
+                    logger.info("Calendário mesmo dia %s: %s", ini_br, ok_cal)
                 self._sleep(0.4)
             else:
-                # sem calendário: clica Fim roxo também e tenta digitar
-                logger.warning("Calendário não abriu — clica Fim roxo")
-                self._click_popup_purple_date("fim")
-                self._sleep(0.4)
-                if self._calendar_visible():
-                    self._select_range_on_calendar(data_ini, data_fim)
-                else:
-                    # último recurso: setar inputs se existirem
-                    try:
-                        d.execute_script(
-                            """
-                            var ini = arguments[0], fim = arguments[1];
-                            var inputs = document.querySelectorAll('input');
-                            var n = 0;
-                            for (var i=0;i<inputs.length;i++){
-                              var el = inputs[i];
-                              var r = el.getBoundingClientRect();
-                              if (r.width < 4 || r.height < 4) continue;
-                              var typ = (el.type||'').toLowerCase();
-                              if (typ==='hidden'||typ==='button'||typ==='submit') continue;
-                              var v = el.value||'';
-                              if (/\\d{2}\\/\\d{2}\\/\\d{4}/.test(v) || /date|data|inicio|fim/i.test((el.id||'')+(el.name||''))){
-                                el.focus(); el.value = (n===0?ini:fim);
-                                el.dispatchEvent(new Event('input',{bubbles:true}));
-                                el.dispatchEvent(new Event('change',{bubbles:true}));
-                                n++; if (n>=2) break;
-                              }
-                            }
-                            return n;
-                            """,
-                            f"{ini_br} 00:00:00",
-                            f"{fim_br} 23:59:59",
-                        )
-                    except Exception:
-                        pass
+                logger.warning("Calendário não abriu (tentativa %s)", attempt)
+                if multi_day:
+                    self._click_popup_purple_date("fim")
+                    self._sleep(0.4)
+                    if self._calendar_visible():
+                        self._select_range_on_calendar(data_ini, data_fim)
+                try:
+                    d.execute_script(
+                        """
+                        var ini = arguments[0], fim = arguments[1];
+                        var inputs = document.querySelectorAll('input');
+                        var n = 0;
+                        for (var i=0;i<inputs.length;i++){
+                          var el = inputs[i];
+                          var r = el.getBoundingClientRect();
+                          if (r.width < 4 || r.height < 4) continue;
+                          var typ = (el.type||'').toLowerCase();
+                          if (typ==='hidden'||typ==='button'||typ==='submit') continue;
+                          var v = el.value||'';
+                          if (/\\d{2}\\/\\d{2}\\/\\d{4}/.test(v) || /date|data|inicio|fim/i.test((el.id||'')+(el.name||''))){
+                            el.focus(); el.value = (n===0?ini:fim);
+                            el.dispatchEvent(new Event('input',{bubbles:true}));
+                            el.dispatchEvent(new Event('change',{bubbles:true}));
+                            n++; if (n>=2) break;
+                          }
+                        }
+                        return n;
+                        """,
+                        f"{ini_br} 00:00:00",
+                        f"{fim_br} 23:59:59",
+                    )
+                except Exception:
+                    pass
 
             self._save_debug(f"data_apos_calendario_{attempt}")
 
-            # 4) se ainda no popup, clica 2ª data (Fim) caso calendário peça
-            #    (alguns fluxos pedem clicar Fim depois do início)
-            if self._wait_filtro_data_popup(0.8):
-                # se calendário ainda aberto e range não fechou, ok
-                pass
-
-            # 5) Filtrar do popup
+            # 4) Filtrar do popup
             self._click_popup_filtrar()
             self._wait_loader_gone(25)
             self._sleep(0.5)
@@ -2610,7 +2636,7 @@ class SitraxBot:
             chip_now = self._read_date_chip_text()
             self._trace(
                 f"data_apos_fill_{attempt}",
-                f"pedido {ini_br}→{fim_br} | chip={chip_now!r}",
+                f"pedido {ini_br}→{fim_br} multi={multi_day} | chip={chip_now!r}",
                 shot=True,
             )
             if self._date_chip_matches(data_ini, data_fim):
