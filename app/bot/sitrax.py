@@ -4052,13 +4052,40 @@ class SitraxBot:
                 self.open_vehicle_selector()
         self.load_vehicle_list(placa=placa)
         self.select_vehicle_by_plate(placa)
+        # confirma chip do veículo antes da data
+        if not self.wait_vehicle_chip(placa, timeout=5.0):
+            logger.warning("Chip %s instável antes da data — re-seleciona", placa)
+            try:
+                self.open_vehicle_selector()
+                self.load_vehicle_list(placa=placa)
+                self.select_vehicle_by_plate(placa)
+            except Exception as e:
+                logger.warning("re-select placa: %s", e)
+
         self.set_date_filter(data_ini, data_fim)
-        # set_date_filter já clica Filter da barra no sucesso; reforço se preciso
+
+        # após filtro de data o chip do veículo pode “sumir” no DOM por AJAX
+        if not self.wait_vehicle_chip(placa, timeout=6.0):
+            logger.warning(
+                "Chip %s sumiu após data — re-seleciona SEM limpar data",
+                placa,
+            )
+            try:
+                self.open_vehicle_selector()
+                self.load_vehicle_list(placa=placa)
+                self.select_vehicle_by_plate(placa)
+                # NÃO reabrir calendário de data — só Filter da barra
+            except Exception as e:
+                logger.warning("re-select após data: %s", e)
+
+        # set_date_filter já clica Filter; reforço + espera grade
         try:
             self.click_filtrar()
         except Exception as e:
             logger.warning("click_filtrar após data (warm): %s", e)
-        self._sleep(0.8)
+        self._sleep(0.6)
+        # última checagem de chip (evita chip_lento falso)
+        self.wait_vehicle_chip(placa, timeout=4.0)
 
     def prepare_next_fleet_plate(
         self,
@@ -4343,22 +4370,28 @@ class SitraxBot:
                 pass
             self._sleep(0.5)
 
-            # Espera o chip (página/AJAX); se falhar, AINDA tenta Filter
-            # (caso PDY1G26: tela já tinha Vehicle:PDY1G26 + 852 regs e chip_sem era falso)
-            chip_ok = self.wait_vehicle_chip(placa_u, timeout=7.0)
+            # Espera o chip (página/AJAX); se falhar, re-seleciona placa (mantém data)
+            chip_ok = self.wait_vehicle_chip(placa_u, timeout=10.0)
             if not chip_ok:
                 logger.warning(
-                    "Chip %s não confirmado após espera (tentativa %s) — segue Filter",
+                    "Chip %s lento após prepare (tentativa %s) — re-seleciona",
                     placa_u,
                     attempt + 1,
                 )
                 self._trace(
                     f"chip_lento_{placa_u}",
-                    f"Chip {placa_u} ainda não estável; segue Filter (pode ser timing)",
+                    f"Chip {placa_u} não estável; re-seleciona placa e Filter",
                     ok=True,
                     shot=False,
                 )
-                # NÃO clear_vehicle_chip aqui — pode apagar seleção boa em meio ao AJAX
+                try:
+                    if not self._vehicle_modal_open():
+                        self.open_vehicle_selector()
+                    self.load_vehicle_list(placa=placa_u)
+                    self.select_vehicle_by_plate(placa_u)
+                    chip_ok = self.wait_vehicle_chip(placa_u, timeout=5.0)
+                except Exception as e:
+                    logger.warning("re-select chip lento: %s", e)
 
             try:
                 self.click_filtrar()
