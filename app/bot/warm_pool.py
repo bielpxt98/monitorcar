@@ -446,6 +446,46 @@ class WarmPool:
                 self.last_error = str(e2)
                 raise
 
+    def force_abort(self) -> None:
+        """
+        Cancela pesquisa na hora: mata o Chrome ocupado e libera o pool.
+        A thread do job pode morrer com WebDriverException — ok.
+        """
+        self._fleet_busy = False
+        bots_to_quit: list[Any] = []
+        with self._lock:
+            for slot in self._slots:
+                with slot.lock:
+                    if slot.bot is not None and slot.status in (
+                        "busy",
+                        "starting",
+                        "ready",
+                        "error",
+                    ):
+                        bots_to_quit.append((slot, slot.bot))
+                        slot.bot = None
+                        slot.status = "error"
+                        slot.message = (
+                            f"Chrome {slot.slot_id + 1}: abortado (cancelar)"
+                        )
+        for slot, bot in bots_to_quit:
+            try:
+                bot.close()
+            except Exception as e:
+                logger.warning(
+                    "force_abort close slot %s: %s", slot.slot_id + 1, e
+                )
+        # reaquece em background para a próxima busca
+        def _reheat() -> None:
+            try:
+                time.sleep(0.4)
+                self.ensure_both()
+            except Exception as e:
+                logger.warning("force_abort reheat: %s", e)
+
+        threading.Thread(target=_reheat, name="warm-abort-reheat", daemon=True).start()
+        logger.info("WarmPool force_abort: %s Chrome(s) mortos", len(bots_to_quit))
+
     # ——— 1 placa ———
 
     def _acquire_slot(self) -> WarmSlot:

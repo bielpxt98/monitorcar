@@ -16,6 +16,7 @@ from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
 from reportlab.lib.units import cm, mm
 from reportlab.lib.utils import ImageReader
 from reportlab.platypus import (
+    PageBreak,
     Paragraph,
     SimpleDocTemplate,
     Spacer,
@@ -29,6 +30,7 @@ from app.bot.report import (
     find_all_desligou,
     find_ignition_events,
     format_time,
+    group_positions_by_day,
 )
 
 # Logo ANTONIO (pdf-fundo) — NÃO usar bg-hero dos headsets
@@ -150,6 +152,119 @@ def _draw_page_background(canvas, doc) -> None:
     canvas.restoreState()
 
 
+_TABLE_HEADER = [
+    ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#ff6b00")),
+    ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+    ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+    ("FONTSIZE", (0, 0), (-1, -1), 10),
+    ("ALIGN", (0, 0), (1, -1), "CENTER"),
+    ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+    ("GRID", (0, 0), (-1, -1), 0.4, colors.HexColor("#e5e7eb")),
+    (
+        "ROWBACKGROUNDS",
+        (0, 1),
+        (-1, -1),
+        [colors.white, colors.HexColor("#fff7ed")],
+    ),
+    ("TOPPADDING", (0, 0), (-1, -1), 6),
+    ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
+    ("LEFTPADDING", (0, 0), (-1, -1), 8),
+]
+
+_OFF_TABLE_STYLE = [
+    ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#374151")),
+    ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+    ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+    ("FONTSIZE", (0, 0), (-1, -1), 10),
+    ("ALIGN", (0, 0), (0, -1), "CENTER"),
+    ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+    ("GRID", (0, 0), (-1, -1), 0.4, colors.HexColor("#e5e7eb")),
+    (
+        "ROWBACKGROUNDS",
+        (0, 1),
+        (-1, -1),
+        [colors.white, colors.HexColor("#f3f4f6")],
+    ),
+    ("TOPPADDING", (0, 0), (-1, -1), 6),
+    ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
+    ("LEFTPADDING", (0, 0), (-1, -1), 8),
+]
+
+
+def _append_day_story(
+    story: list,
+    day_pos: list[Position],
+    body_style,
+    day_label: str = "",
+) -> None:
+    """Monta resumo (ligou / cidades / desligou) de um único dia."""
+    ordered = sorted([p for p in day_pos if p.when], key=lambda p: p.when)  # type: ignore
+    segments = build_segments(ordered)
+    ligou, _ = find_ignition_events(ordered)
+    desligues = find_all_desligou(ordered)
+
+    if day_label:
+        day_style = ParagraphStyle(
+            "DayHead",
+            parent=body_style,
+            fontSize=13,
+            fontName="Helvetica-Bold",
+            textColor=colors.HexColor("#c2410c"),
+            spaceBefore=2,
+            spaceAfter=6,
+        )
+        story.append(Paragraph(f"📆 {day_label}", day_style))
+        story.append(Spacer(1, 2 * mm))
+
+    if ligou:
+        story.append(
+            Paragraph(f"Ligou às <b>{format_time(ligou)}</b>", body_style)
+        )
+        story.append(Spacer(1, 3 * mm))
+
+    if not segments:
+        story.append(
+            Paragraph(
+                "Nenhum registro de posição encontrado neste dia.",
+                body_style,
+            )
+        )
+    else:
+        story.append(Paragraph("<b>Resumo por cidade / horário</b>", body_style))
+        story.append(Spacer(1, 2 * mm))
+        data = [["De", "Até", "Cidade / local"]]
+        for seg in segments:
+            data.append(
+                [
+                    format_time(seg.inicio),
+                    format_time(seg.fim),
+                    seg.cidade,
+                ]
+            )
+        table = Table(data, colWidths=[2.6 * cm, 2.6 * cm, 10.2 * cm])
+        table.setStyle(TableStyle(_TABLE_HEADER))
+        story.append(table)
+
+    if desligues:
+        story.append(Spacer(1, 5 * mm))
+        story.append(Paragraph("<b>Desligou</b>", body_style))
+        story.append(Spacer(1, 2 * mm))
+        off_data = [["Hora", "Cidade"]]
+        for d in desligues:
+            off_data.append([format_time(d.when), d.cidade])
+        off_table = Table(off_data, colWidths=[3 * cm, 12.4 * cm])
+        off_table.setStyle(TableStyle(_OFF_TABLE_STYLE))
+        story.append(off_table)
+
+    story.append(Spacer(1, 4 * mm))
+    story.append(
+        Paragraph(
+            f"Pontos GPS do dia: <b>{len(ordered)}</b>",
+            body_style,
+        )
+    )
+
+
 def build_summary_pdf_bytes(
     placa: str,
     positions: list[Position],
@@ -159,10 +274,10 @@ def build_summary_pdf_bytes(
 ) -> bytes:
     """
     PDF limpo e curto: horários por cidade + foto de fundo do app.
+    Multi-dia: uma página (seção) por data.
     NÃO é o histórico completo do Sitrax.
     """
     buffer = io.BytesIO()
-    # margens um pouco maiores por causa do cartão arredondado
     doc = SimpleDocTemplate(
         buffer,
         pagesize=A4,
@@ -206,28 +321,25 @@ def build_summary_pdf_bytes(
         alignment=TA_CENTER,
     )
 
-    ordered = sorted([p for p in positions if p.when], key=lambda p: p.when)  # type: ignore
-    segments = build_segments(ordered)
-    ligou, _ = find_ignition_events(ordered)
-    desligues = find_all_desligou(ordered)
+    day_groups = group_positions_by_day(positions)
+    total_pts = sum(len(g[1]) for g in day_groups)
+    multi = len(day_groups) > 1
 
-    story = []
+    story: list = []
     story.append(Paragraph(titulo, title_style))
     header_bits = [f"<b>Placa:</b> {placa.upper()}"]
     if cliente:
         header_bits.append(f"<b>Cliente:</b> {cliente}")
     if data_ref:
-        header_bits.append(f"<b>Data:</b> {data_ref}")
-    story.append(Paragraph(" &nbsp;|&nbsp; ".join(header_bits), sub_style))
-    story.append(Spacer(1, 4 * mm))
-
-    if ligou:
-        story.append(
-            Paragraph(f"Ligou às <b>{format_time(ligou)}</b>", body_style)
+        header_bits.append(f"<b>Período:</b> {data_ref}")
+    elif day_groups and not multi:
+        header_bits.append(
+            f"<b>Data:</b> {day_groups[0][0].strftime('%d/%m/%Y')}"
         )
-        story.append(Spacer(1, 4 * mm))
+    story.append(Paragraph(" &nbsp;|&nbsp; ".join(header_bits), sub_style))
+    story.append(Spacer(1, 3 * mm))
 
-    if not segments:
+    if not day_groups:
         story.append(
             Paragraph(
                 "Nenhum registro de posição encontrado no período.",
@@ -235,83 +347,40 @@ def build_summary_pdf_bytes(
             )
         )
     else:
-        story.append(Paragraph("<b>Resumo por cidade / horário</b>", body_style))
-        story.append(Spacer(1, 3 * mm))
+        for i, (day, day_pos) in enumerate(day_groups):
+            if multi and i > 0:
+                story.append(PageBreak())
+                # cabeçalho leve em cada página de dia
+                story.append(Paragraph(titulo, title_style))
+                story.append(
+                    Paragraph(
+                        f"<b>Placa:</b> {placa.upper()}"
+                        + (
+                            f" &nbsp;|&nbsp; <b>Cliente:</b> {cliente}"
+                            if cliente
+                            else ""
+                        ),
+                        sub_style,
+                    )
+                )
+                story.append(Spacer(1, 2 * mm))
+            day_label = day.strftime("%d/%m/%Y") if multi else ""
+            _append_day_story(story, day_pos, body_style, day_label=day_label)
 
-        data = [["De", "Até", "Cidade / local"]]
-        for seg in segments:
-            data.append(
-                [
-                    format_time(seg.inicio),
-                    format_time(seg.fim),
-                    seg.cidade,
-                ]
-            )
-
-        table = Table(data, colWidths=[2.6 * cm, 2.6 * cm, 10.2 * cm])
-        table.setStyle(
-            TableStyle(
-                [
-                    ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#ff6b00")),
-                    ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
-                    ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
-                    ("FONTSIZE", (0, 0), (-1, -1), 10),
-                    ("ALIGN", (0, 0), (1, -1), "CENTER"),
-                    ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
-                    ("GRID", (0, 0), (-1, -1), 0.4, colors.HexColor("#e5e7eb")),
-                    (
-                        "ROWBACKGROUNDS",
-                        (0, 1),
-                        (-1, -1),
-                        [colors.white, colors.HexColor("#fff7ed")],
-                    ),
-                    ("TOPPADDING", (0, 0), (-1, -1), 6),
-                    ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
-                    ("LEFTPADDING", (0, 0), (-1, -1), 8),
-                ]
-            )
-        )
-        story.append(table)
-
-    # Desligou: todos os eventos, cidade no momento do desligue
-    if desligues:
-        story.append(Spacer(1, 6 * mm))
-        story.append(Paragraph("<b>Desligou</b>", body_style))
-        story.append(Spacer(1, 2 * mm))
-        off_data = [["Hora", "Cidade"]]
-        for d in desligues:
-            off_data.append([format_time(d.when), d.cidade])
-        off_table = Table(off_data, colWidths=[3 * cm, 12.4 * cm])
-        off_table.setStyle(
-            TableStyle(
-                [
-                    ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#374151")),
-                    ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
-                    ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
-                    ("FONTSIZE", (0, 0), (-1, -1), 10),
-                    ("ALIGN", (0, 0), (0, -1), "CENTER"),
-                    ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
-                    ("GRID", (0, 0), (-1, -1), 0.4, colors.HexColor("#e5e7eb")),
-                    (
-                        "ROWBACKGROUNDS",
-                        (0, 1),
-                        (-1, -1),
-                        [colors.white, colors.HexColor("#f3f4f6")],
-                    ),
-                    ("TOPPADDING", (0, 0), (-1, -1), 6),
-                    ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
-                    ("LEFTPADDING", (0, 0), (-1, -1), 8),
-                ]
-            )
-        )
-        story.append(off_table)
-
-    story.append(Spacer(1, 10 * mm))
+    story.append(Spacer(1, 8 * mm))
+    foot_extra = (
+        f" · {len(day_groups)} dia(s)" if multi and day_groups else ""
+    )
     story.append(
         Paragraph(
-            f"Pontos GPS analisados: {len(ordered)} &nbsp;·&nbsp; "
+            f"Pontos GPS analisados: {total_pts}{foot_extra} &nbsp;·&nbsp; "
             f"Gerado em {datetime.now().strftime('%d/%m/%Y %H:%M')}<br/>"
-            "Este PDF é um resumo. Não contém o histórico completo do rastreador.",
+            "Este PDF é um resumo. Não contém o histórico completo do rastreador."
+            + (
+                "<br/>Cada dia do período aparece em página separada."
+                if multi
+                else ""
+            ),
             foot_style,
         )
     )

@@ -524,7 +524,7 @@ def run_fleet_parallel(
                 total_done += int(st.get("done") or 0)
                 pl = st.get("placa") or "…"
                 parts.append(f"C{wid+1}:{st.get('done', 0)}/{st.get('total', 0)} {pl}")
-            prefix = "Cancelando… " if (cancel_check and cancel_check()) else ""
+            prefix = "Cancelado. " if (cancel_check and cancel_check()) else ""
             job_message_cb(
                 f"{prefix}Frota {total_done}/{total} — " + " · ".join(parts)
             )

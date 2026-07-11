@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import date, datetime
 from typing import Optional
 
 
@@ -411,40 +411,30 @@ def find_ignition_events(
     return ligou, desligou
 
 
-def build_narrative_report(
-    placa: str,
+def group_positions_by_day(
     positions: list[Position],
-    data_ref: str = "",
-    cliente: str = "",
-) -> str:
-    """
-    Exemplo:
-    - Ligou às 06:01
-    - de 06:01 às 12:00 esteve em Abreu e Lima
-    - de 12:00 às 14:00 esteve em Paulista
-    - Desligou:
-        • 07:26 em Paulista
-        • 12:40 em Recife
-    """
-    lines: list[str] = []
-    header = f"📋 Relatório — placa {placa.upper()}"
-    if cliente:
-        header += f" ({cliente})"
-    if data_ref:
-        header += f"\n📅 Data: {data_ref}"
-    lines.append(header)
-    lines.append("")
+) -> list[tuple[date, list[Position]]]:
+    """Agrupa posições por dia civil (data GPS/sistema). Ordem cronológica."""
+    buckets: dict[date, list[Position]] = {}
+    for p in positions:
+        if not p.when:
+            continue
+        d = p.when.date()
+        buckets.setdefault(d, []).append(p)
+    out: list[tuple[date, list[Position]]] = []
+    for d in sorted(buckets.keys()):
+        day_pos = sorted(buckets[d], key=lambda x: x.when)  # type: ignore[arg-type, return-value]
+        out.append((d, day_pos))
+    return out
 
-    ordered = sorted(
-        [p for p in positions if p.when],
-        key=lambda p: p.when,  # type: ignore[arg-type, return-value]
-    )
-    if not positions or not ordered:
-        # Caso real: Sitrax sem GPS no dia (não é falha do robô)
-        lines.append("ℹ️ Sem posições GPS no período (Sitrax: 0 registros).")
-        lines.append("")
-        lines.append("Total de pontos GPS: 0")
-        return "\n".join(lines)
+
+def _narrative_for_day(ordered: list[Position]) -> list[str]:
+    """Corpo do relatório de UM dia (já ordenado)."""
+    lines: list[str] = []
+    if not ordered:
+        lines.append("ℹ️ Sem posições GPS neste dia.")
+        return lines
+
     ligou, _ = find_ignition_events(ordered)
     desligues = find_all_desligou(ordered)
     segments = build_segments(ordered)
@@ -459,7 +449,6 @@ def build_narrative_report(
                 f"(modo: {ordered[0].modo or 'n/d'})"
             )
 
-    # Esteve em… (inalterado — resumo por cidade)
     lines.append("")
     lines.append("📍 Resumo por cidade / horário:")
     for seg in segments:
@@ -467,7 +456,6 @@ def build_narrative_report(
             f"   • {format_range(seg.inicio, seg.fim)} esteve em {seg.cidade}"
         )
 
-    # Só a parte de desligou: TODOS os desligues + cidade na hora
     lines.append("")
     if desligues:
         if len(desligues) == 1:
@@ -476,7 +464,7 @@ def build_narrative_report(
                 f"🔒 Desligou às {format_time(d.when)} em {d.cidade}"
             )
         else:
-            lines.append(f"🔒 Desligou ({len(desligues)}x no período):")
+            lines.append(f"🔒 Desligou ({len(desligues)}x):")
             for d in desligues:
                 lines.append(
                     f"   • {format_time(d.when)} em {d.cidade}"
@@ -489,8 +477,63 @@ def build_narrative_report(
                 f"{last.cidade} ({last.modo or 'n/d'})"
             )
 
+    lines.append(f"Pontos GPS do dia: {len(ordered)}")
+    return lines
+
+
+def build_narrative_report(
+    placa: str,
+    positions: list[Position],
+    data_ref: str = "",
+    cliente: str = "",
+) -> str:
+    """
+    Exemplo (1 dia):
+    - Ligou às 06:01
+    - de 06:01 às 12:00 esteve em Abreu e Lima
+    - Desligou às 18:00 em Paulista
+
+    Multi-dia: um bloco por data (10/07, 11/07, …).
+    """
+    lines: list[str] = []
+    header = f"📋 Relatório — placa {placa.upper()}"
+    if cliente:
+        header += f" ({cliente})"
+    if data_ref:
+        header += f"\n📅 Período: {data_ref}"
+    lines.append(header)
     lines.append("")
-    lines.append(f"Total de pontos GPS: {len(ordered)}")
+
+    day_groups = group_positions_by_day(positions)
+    if not day_groups:
+        lines.append("ℹ️ Sem posições GPS no período (Sitrax: 0 registros).")
+        lines.append("")
+        lines.append("Total de pontos GPS: 0")
+        return "\n".join(lines)
+
+    total = 0
+    for i, (day, day_pos) in enumerate(day_groups):
+        total += len(day_pos)
+        if len(day_groups) > 1:
+            lines.append("─" * 36)
+            lines.append(f"📆 Data: {day.strftime('%d/%m/%Y')}")
+            lines.append("─" * 36)
+        elif not data_ref:
+            lines.append(f"📅 Data: {day.strftime('%d/%m/%Y')}")
+            lines.append("")
+        lines.extend(_narrative_for_day(day_pos))
+        if i < len(day_groups) - 1:
+            lines.append("")
+
+    if len(day_groups) > 1:
+        lines.append("")
+        lines.append(
+            f"Total de pontos GPS (todos os dias): {total} "
+            f"· {len(day_groups)} dia(s)"
+        )
+    else:
+        lines.append("")
+        lines.append(f"Total de pontos GPS: {total}")
     return "\n".join(lines)
 
 

@@ -35,7 +35,8 @@ logging.basicConfig(
 logger = logging.getLogger("sitrax-bot")
 
 BASE = Path(__file__).resolve().parent
-executor = ThreadPoolExecutor(max_workers=1)  # 1 por vez no Chrome
+# 2: após cancel, a thread morta pode limpar enquanto a nova já sobe
+executor = ThreadPoolExecutor(max_workers=2)
 
 # rotas abertas sem login
 _PUBLIC_PREFIXES = (
@@ -115,13 +116,34 @@ _JOB: dict = {
     "error": "",
     "done": False,
     "cancel": False,
+    "id": 0,  # gera a cada start; cancel/nova busca invalidam a thread antiga
 }
+_JOB_ID_SEQ = 0
 # flash one-shot (POST /gerar → redirect /) para a URL voltar à home
 _FLASH: dict = {"error": None, "job_msg": None, "placa": None}
 
 
 def job_cancelled() -> bool:
     return bool(_JOB.get("cancel"))
+
+
+def _force_cancel_now(message: str = "Pesquisa cancelada. Pode buscar outra placa.") -> None:
+    """Marca cancel + libera UI na hora + mata Chrome ocupado."""
+    global _JOB_ID_SEQ
+    # invalida a thread antiga para ela não sobrescrever a próxima busca
+    _JOB_ID_SEQ += 1
+    _JOB["id"] = _JOB_ID_SEQ
+    _JOB["cancel"] = True
+    _JOB["running"] = False
+    _JOB["done"] = True
+    _JOB["error"] = ""
+    _JOB["message"] = message
+    try:
+        from app.bot.warm_pool import warm_pool
+
+        warm_pool.force_abort()
+    except Exception as e:
+        logger.warning("force_abort no cancel: %s", e)
 
 
 @app.middleware("http")
@@ -547,6 +569,10 @@ def _start_bg_job(modo: str, placa: str, d_ini: date, d_fim: date) -> bool:
     if _JOB.get("running"):
         return False
 
+    global _JOB_ID_SEQ
+    _JOB_ID_SEQ += 1
+    my_id = _JOB_ID_SEQ
+
     def work():
         _JOB.update(
             {
@@ -558,12 +584,19 @@ def _start_bg_job(modo: str, placa: str, d_ini: date, d_fim: date) -> bool:
                 "placa": placa,
                 "started": datetime.now().strftime("%H:%M:%S"),
                 "message": "Iniciando…",
+                "id": my_id,
             }
         )
+
+        def _still_mine() -> bool:
+            return _JOB.get("id") == my_id
+
         try:
-            if job_cancelled():
+            if job_cancelled() or not _still_mine():
                 raise JobCancelled("Cancelado antes de iniciar")
             result = _run_job(modo, placa, d_ini, d_fim)
+            if not _still_mine():
+                return  # cancelou / outra busca já mandou
             if job_cancelled():
                 _JOB["message"] = (
                     "Pesquisa cancelada. Pode buscar outra placa."
@@ -579,9 +612,10 @@ def _start_bg_job(modo: str, placa: str, d_ini: date, d_fim: date) -> bool:
             _JOB["done"] = True
         except JobCancelled as e:
             logger.info("Job cancelado: %s", e)
-            _JOB["error"] = ""
-            _JOB["message"] = "Pesquisa cancelada. Pode buscar outra placa."
-            _JOB["done"] = True
+            if _still_mine():
+                _JOB["error"] = ""
+                _JOB["message"] = "Pesquisa cancelada. Pode buscar outra placa."
+                _JOB["done"] = True
             try:
                 from app.bot.warm_pool import warm_pool
 
@@ -589,7 +623,20 @@ def _start_bg_job(modo: str, placa: str, d_ini: date, d_fim: date) -> bool:
             except Exception:
                 pass
         except Exception as e:
-            if job_cancelled() or "cancelad" in str(e).lower():
+            # driver morto por force_abort → trata como cancel
+            err_l = str(e).lower()
+            aborted = (
+                job_cancelled()
+                or "cancelad" in err_l
+                or "invalid session" in err_l
+                or "session deleted" in err_l
+                or "no such window" in err_l
+                or "chrome not reachable" in err_l
+                or "disconnected" in err_l
+            )
+            if not _still_mine():
+                return
+            if aborted:
                 logger.info("Job interrompido: %s", e)
                 _JOB["error"] = ""
                 _JOB["message"] = "Pesquisa cancelada. Pode buscar outra placa."
@@ -599,8 +646,9 @@ def _start_bg_job(modo: str, placa: str, d_ini: date, d_fim: date) -> bool:
                 _JOB["message"] = f"Erro: {e}"
             _JOB["done"] = True
         finally:
-            _JOB["running"] = False
-            _JOB["cancel"] = False
+            if _still_mine():
+                _JOB["running"] = False
+                _JOB["cancel"] = False
 
     executor.submit(work)
     return True
@@ -608,26 +656,25 @@ def _start_bg_job(modo: str, placa: str, d_ini: date, d_fim: date) -> bool:
 
 @app.post("/cancelar")
 async def cancelar_pesquisa(request: Request):
-    """Cancela a pesquisa em andamento para liberar e buscar outra placa."""
-    if not _JOB.get("running"):
+    """Cancela na hora: libera busca e mata o Chrome da pesquisa atual."""
+    if not _JOB.get("running") and not _JOB.get("cancel"):
         _FLASH["job_msg"] = "Nenhuma pesquisa em andamento."
         return RedirectResponse(url="/", status_code=303)
-    _JOB["cancel"] = True
-    _JOB["message"] = "Cancelando… aguarde a placa atual terminar."
-    logger.info("Cancelamento pedido pelo usuário (job desde %s)", _JOB.get("started"))
+    logger.info(
+        "Cancelamento IMEDIATO (job desde %s)", _JOB.get("started")
+    )
+    _force_cancel_now()
     _FLASH["job_msg"] = (
-        "Cancelamento pedido. Assim que a placa atual terminar, "
-        "a pesquisa para e você pode buscar outra."
+        "Pesquisa cancelada. Pode buscar outra placa agora."
     )
     return RedirectResponse(url="/", status_code=303)
 
 
 @app.post("/api/cancelar")
 async def api_cancelar():
-    if not _JOB.get("running"):
+    if not _JOB.get("running") and not _JOB.get("cancel"):
         return {"ok": False, "error": "Nenhuma pesquisa em andamento"}
-    _JOB["cancel"] = True
-    _JOB["message"] = "Cancelando… aguarde a placa atual terminar."
+    _force_cancel_now()
     return {"ok": True, "message": _JOB["message"]}
 
 
