@@ -21,6 +21,39 @@ def test_parse_dt():
 def test_extract_city():
     assert "Abreu" in extract_city("Avenida D - Abreu e Lima (PE)", "")
     assert extract_city("Rua Presidente Vargas - Paulista...", "389 Metros de PARATIBE") == "Paulista"
+    assert (
+        extract_city(
+            "Rua Presidente Vargas - Paulista (... 349 Metros de PARATIBE",
+            "",
+        )
+        == "Paulista"
+    )
+
+
+def test_unknown_city_does_not_swallow_paulista():
+    from app.bot.report import build_segments, Position
+    from datetime import datetime
+
+    positions = [
+        Position(
+            data_gps=datetime(2026, 7, 11, 0, 54, 58),
+            data_sistema=None,
+            modo="Parked",
+            endereco="",  # scrape sem endereço no início
+            referencia="",
+        ),
+        Position(
+            data_gps=datetime(2026, 7, 11, 8, 1, 34),
+            data_sistema=None,
+            modo="Parked",
+            endereco="Rua Presidente Vargas - Paulista (... 349 Metros de PARATIBE",
+            referencia="",
+        ),
+    ]
+    segs = build_segments(positions)
+    assert len(segs) >= 1
+    assert any("Paulista" in s.cidade for s in segs)
+    assert not any(s.cidade.lower() == "local desconhecido" for s in segs)
 
 
 def test_narrative():

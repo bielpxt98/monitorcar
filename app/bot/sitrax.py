@@ -1942,9 +1942,9 @@ class SitraxBot:
         """
         d = self._d()
         self._sleep(0.6)
-        # rola o corpo da tabela (DataTables / scroll interno) várias vezes
+        # rola vertical + horizontal (endereço fica à direita e some do scrape)
         try:
-            for _ in range(4):
+            for _ in range(5):
                 d.execute_script(
                     """
                     var boxes = document.querySelectorAll(
@@ -1952,12 +1952,25 @@ class SitraxBot:
                       '.table-responsive, [class*="scroll"], .dataTables_wrapper'
                     );
                     for (var i = 0; i < boxes.length; i++) {
-                      try { boxes[i].scrollTop = boxes[i].scrollHeight; } catch(e) {}
+                      try {
+                        boxes[i].scrollTop = boxes[i].scrollHeight;
+                        boxes[i].scrollLeft = boxes[i].scrollWidth;
+                      } catch(e) {}
                     }
-                    window.scrollBy(0, 600);
+                    window.scrollBy(0, 400);
                     """
                 )
-                self._sleep(0.25)
+                self._sleep(0.2)
+            # volta um pouco à esquerda para datas + modo também estarem no layout
+            d.execute_script(
+                """
+                var boxes = document.querySelectorAll('.dataTables_scrollBody');
+                for (var i = 0; i < boxes.length; i++) {
+                  try { boxes[i].scrollLeft = 0; } catch(e) {}
+                }
+                """
+            )
+            self._sleep(0.15)
         except Exception:
             pass
 
@@ -1966,10 +1979,12 @@ class SitraxBot:
                 """
                 function txt(el) {
                   if (!el) return '';
-                  return (el.innerText || el.textContent || '').replace(/\\s+/g,' ').trim();
+                  // textContent pega texto de células cortadas/overflow
+                  return (el.textContent || el.innerText || '').replace(/\\s+/g,' ').trim();
                 }
                 var DATE_RE = /\\d{2}\\/\\d{2}\\/\\d{4}\\s+\\d{2}:\\d{2}(:\\d{2})?/;
-                var MODE_RE = /parked|estacionado|normal|in\\s*motion|em\\s*movimento|movimento|igni|alerta/i;
+                var MODE_RE = /^(parked|estacionado|normal|in\\s*motion|em\\s*movimento)$/i;
+                var MODE_SOFT = /parked|estacionado|normal|in\\s*motion|em\\s*movimento|movimento|igni|alerta/i;
 
                 // ---- headers: junta thead de TODAS as tabelas (scrollHead) ----
                 var headers = [];
@@ -1977,10 +1992,8 @@ class SitraxBot:
                   var t = txt(th);
                   if (t) headers.push(t);
                 });
-                // se ainda vazio, tenta primeira linha de th em qualquer table
                 if (!headers.length) {
-                  var ths = document.querySelectorAll('table tr th');
-                  ths.forEach(function(th) {
+                  document.querySelectorAll('table tr th').forEach(function(th) {
                     var t = txt(th);
                     if (t) headers.push(t);
                   });
@@ -1995,24 +2008,33 @@ class SitraxBot:
                   }
                   return -1;
                 }
-                var iGps = findCol(['GPS Date','Data GPS','GPS']);
-                var iSis = findCol(['Date System','System Date','Data Sistema','Sistema']);
-                var iModo = findCol(['Mode','Modo','Status']);
-                var iEnd = findCol(['Address','Location','Endereço','Endereco','Event']);
+                // NÃO usar 'Event' como endereço (coluna errada)
+                var iGps = findCol(['GPS Date','Data GPS']);
+                var iSis = findCol(['Date System','System Date','Data Sistema']);
+                var iModo = findCol(['Mode','Modo']);
+                var iEnd = findCol(['Address','Location','Endereço','Endereco']);
                 var iRef = findCol(['Reference','Referência','Referencia']);
                 var iTemp = findCol(['Temperature','Temperatura']);
 
-                // ---- linhas: preferir scrollBody; senão todas as tr com td ----
+                // ---- linhas: SÓ scrollBody (evita dobrar contagem com outra table) ----
                 var trs = [];
                 var bodyBoxes = document.querySelectorAll(
-                  '.dataTables_scrollBody tbody tr, .ui-datatable-scrollable-body tbody tr'
+                  '.dataTables_scrollBody tbody tr'
                 );
                 if (bodyBoxes && bodyBoxes.length) {
                   trs = Array.prototype.slice.call(bodyBoxes);
                 } else {
-                  document.querySelectorAll('table tbody tr, table tr').forEach(function(tr) {
-                    if (tr.querySelectorAll('td').length >= 2) trs.push(tr);
+                  // fallback: a table com mais tr que tenham data
+                  var best = [];
+                  document.querySelectorAll('table').forEach(function(tb) {
+                    var rows = tb.querySelectorAll('tbody tr');
+                    var good = [];
+                    rows.forEach(function(tr) {
+                      if (DATE_RE.test(txt(tr))) good.push(tr);
+                    });
+                    if (good.length > best.length) best = good;
                   });
+                  trs = best;
                 }
 
                 var out = [];
@@ -2029,14 +2051,17 @@ class SitraxBot:
                   }
 
                   var dates = [];
-                  for (var d = 0; d < texts.length; d++) {
-                    if (DATE_RE.test(texts[d])) dates.push(texts[d].match(DATE_RE)[0]);
+                  for (var di = 0; di < texts.length; di++) {
+                    var dm = texts[di].match(DATE_RE);
+                    if (dm) dates.push(dm[0]);
                   }
                   var modo = cell(iModo);
-                  if (!modo) {
+                  if (!MODE_SOFT.test(modo)) {
+                    modo = '';
                     for (var k = 0; k < texts.length; k++) {
-                      if (MODE_RE.test(texts[k]) && texts[k].length < 60) {
-                        modo = texts[k]; break;
+                      if (MODE_RE.test(texts[k].trim()) ||
+                          (MODE_SOFT.test(texts[k]) && texts[k].length < 40)) {
+                        modo = texts[k].trim(); break;
                       }
                     }
                   }
@@ -2046,17 +2071,29 @@ class SitraxBot:
                   if (!DATE_RE.test(data_sis) && dates.length > 1) data_sis = dates[1];
 
                   var endereco = cell(iEnd);
-                  if (!endereco) {
+                  if (!endereco || endereco.length < 8) {
                     for (var k3 = 0; k3 < texts.length; k3++) {
-                      if (/\\([A-Z]{2}\\)/.test(texts[k3]) ||
-                          /rua|avenida|av\\.|rodovia|estrada|street|road|city/i.test(texts[k3])) {
-                        endereco = texts[k3]; break;
+                      var tk = texts[k3];
+                      if (/rua|avenida|av\\.|rodovia|estrada|street|road/i.test(tk) ||
+                          (/-\\s*[A-Za-zÀ-ú]{3,}/.test(tk) && tk.length > 12) ||
+                          /metros\\s+de/i.test(tk)) {
+                        endereco = tk; break;
+                      }
+                    }
+                  }
+                  var referencia = cell(iRef);
+                  if (!referencia) {
+                    for (var k4 = 0; k4 < texts.length; k4++) {
+                      if (/metros\\s+de/i.test(texts[k4])) {
+                        referencia = texts[k4]; break;
                       }
                     }
                   }
 
                   if (!DATE_RE.test(data_gps) && !endereco) continue;
-                  var key = (data_gps || '') + '|' + (modo || '') + '|' + (endereco || '').slice(0,40);
+                  // dedupe só pela data GPS (evita 16 pts a partir de 8 registros)
+                  var key = (data_gps || '').replace(/\\s+/g,'');
+                  if (!key) key = (dates[0] || '') + '|' + r;
                   if (seen[key]) continue;
                   seen[key] = 1;
 
@@ -2065,7 +2102,7 @@ class SitraxBot:
                     data_sistema: data_sis || '',
                     modo: modo || '',
                     endereco: endereco || '',
-                    referencia: cell(iRef) || '',
+                    referencia: referencia || '',
                     temperatura: cell(iTemp) || '',
                     raw_cells: texts
                   });

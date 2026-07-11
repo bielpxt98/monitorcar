@@ -76,6 +76,17 @@ def extract_city(endereco: str, referencia: str = "") -> str:
     if not text or re.search(r"local\s+desconhecido", text, re.I):
         return "Local desconhecido"
 
+    # "Rua X - Paulista (... 349 Metros de PARATIBE" (truncado, sem UF)
+    m = re.search(
+        r"[-–]\s*([A-Za-zÀ-ú][A-Za-zÀ-ú\s]{2,40?}?)(?:\s*[\(\.]|\s+\d|\s*$)",
+        text,
+    )
+    if m:
+        cand = m.group(1).strip()
+        if cand and not re.search(r"\d{2}/\d{2}", cand) and len(cand) < 35:
+            # só aceita se parecer cidade conhecida ou nome simples
+            pass  # validado abaixo na lista; se não achar, tenta outros padrões
+
     # "Cidade (UF)" no fim ou no meio
     m = re.search(
         r"[-–,]?\s*([A-Za-zÀ-ú][A-Za-zÀ-ú\s]{1,40}?)\s*\(([A-Z]{2})\)\s*$",
@@ -95,6 +106,17 @@ def extract_city(endereco: str, referencia: str = "") -> str:
     m = re.search(r"\bde\s+([A-ZÁÉÍÓÚÃÕÂÊÔÇ][A-Za-zÀ-ú\s]{2,40})\b", referencia)
     if m:
         return m.group(1).strip().title()
+
+    # "Metros de PARATIBE" / "de PAULISTA" na referência
+    m = re.search(
+        r"(?:metros\s+de|de)\s+([A-ZÁÉÍÓÚÃÕÂÊÔÇ][A-Za-zÀ-ú\s]{2,40})",
+        text,
+        re.I,
+    )
+    if m:
+        cand = m.group(1).strip().title()
+        if cand.lower() not in ("paratibe",):  # bairro — tenta lista de cidades depois
+            pass
 
     # Cidades da Grande Recife / PE (mais longas primeiro)
     cities = [
@@ -202,14 +224,21 @@ def _normalize_city(name: str) -> str:
     return " ".join(out)
 
 
+def _is_unknown_city(name: str) -> bool:
+    n = (name or "").strip().lower()
+    return (not n) or n in ("local desconhecido", "desconhecido", "unknown")
+
+
 def _same_city(a: str, b: str) -> bool:
     """Considera Jaboatão ≈ Jaboatão dos Guararapes, etc."""
     a = _normalize_city(a)
     b = _normalize_city(b)
     if a == b:
         return True
-    if a == "Local Desconhecido" or b == "Local Desconhecido":
-        return True
+    # NÃO tratar "Local desconhecido" como igual a Paulista/Recife —
+    # isso colava o segmento inteiro em "Local Desconhecido".
+    if _is_unknown_city(a) or _is_unknown_city(b):
+        return False
     # abreviações / variantes
     al, bl = a.lower(), b.lower()
     if al in bl or bl in al:
@@ -243,6 +272,19 @@ def build_segments(
 
     for pos in ordered[1:]:
         city = _normalize_city(pos.cidade)
+        # se atual é desconhecido e o novo tem cidade → assume mesma estadia, troca o nome
+        if _is_unknown_city(current_city) and not _is_unknown_city(city):
+            current_city = city
+            end = pos.when
+            if pos.modo and pos.modo not in modos:
+                modos.append(pos.modo)
+            continue
+        # se novo é desconhecido e atual tem cidade → mantém cidade conhecida
+        if _is_unknown_city(city) and not _is_unknown_city(current_city):
+            end = pos.when
+            if pos.modo and pos.modo not in modos:
+                modos.append(pos.modo)
+            continue
         if _same_city(city, current_city):
             end = pos.when
             if pos.modo and pos.modo not in modos:
