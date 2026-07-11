@@ -3330,7 +3330,8 @@ class SitraxBot:
                 shot=True,
             )
 
-            # 4) Filter do popup — OBRIGATÓRIO (não só clicar: popup TEM que FECHAR)
+            # 4) Filter do popup — SEMPRE clica se o botão existir
+            #    (não confiar só em “popup fechado”: às vezes detecção mente)
             pop_ok = (
                 pop_ini == ini_br
                 and (pop_fim == fim_br or (not multi_day and pop_fim == ini_br))
@@ -3342,61 +3343,86 @@ class SitraxBot:
                     pop_fim,
                 )
 
-            popup_closed = False
-            for ft in range(5):
-                if not self._popup_filtro_data_open():
-                    popup_closed = True
-                    logger.info("Popup Filter Date já fechado (ft=%s)", ft)
-                    break
-                logger.info("Clicando Filter do popup (tentativa %s)…", ft + 1)
-                self._click_popup_filtrar()
-                self._sleep(0.55)
-                # sucesso real = popup sumiu (Home/End/Close sumiram)
-                if not self._popup_filtro_data_open():
-                    popup_closed = True
-                    logger.info("Filter aplicou — popup fechou")
-                    break
-                self._sleep(0.35)
-
-            if not popup_closed and self._popup_filtro_data_open():
-                # último recurso: Enter no botão / form
-                try:
-                    d.execute_script(
-                        """
-                        var box = document.getElementById('idFiltroDataIni');
-                        var root = box || document.body;
-                        var btns = root.querySelectorAll('button');
-                        for (var i=0;i<btns.length;i++){
-                          var t = (btns[i].innerText||'').trim();
-                          if (t === 'Filter' || t === 'Filtrar'){
-                            btns[i].focus();
-                            btns[i].click();
-                            return true;
-                          }
-                        }
-                        return false;
-                        """
-                    )
-                    self._sleep(0.6)
-                    popup_closed = not self._popup_filtro_data_open()
-                except Exception:
-                    pass
-
+            # FOTO antes de filtrar (pedido do usuário)
+            loc_btn = self._locate_popup_filter_button()
+            self._save_debug(
+                f"data_antes_filtrar_{attempt}",
+                f"Home={pop_ini} End={pop_fim} btn={loc_btn}",
+            )
             self._trace(
-                f"data_apos_filter_btn_{attempt}",
-                f"popup_closed={popup_closed} pop_ok={pop_ok} "
-                f"Home={pop_ini} End={pop_fim}",
+                f"data_antes_filtrar_{attempt}",
+                f"Vai clicar Filter do popup | Home={pop_ini} End={pop_fim} "
+                f"btn={loc_btn}",
                 shot=True,
             )
 
-            if not popup_closed:
-                # NÃO desiste fingindo sucesso — tenta de novo o fluxo
+            filter_clicked = False
+            popup_closed = False
+            for ft in range(5):
+                # se ainda dá pra achar o botão Filter do popup → clica
+                loc_btn = self._locate_popup_filter_button()
+                still_open = self._popup_filtro_data_open() or bool(loc_btn)
+                if not still_open and filter_clicked:
+                    popup_closed = True
+                    logger.info("Popup fechou após Filter (ft=%s)", ft)
+                    break
+                if not loc_btn and not still_open:
+                    if filter_clicked:
+                        popup_closed = True
+                    break
+                logger.info(
+                    "Clicando Filter do popup (tentativa %s) loc=%s…",
+                    ft + 1,
+                    loc_btn,
+                )
+                if self._click_popup_filtrar():
+                    filter_clicked = True
+                self._sleep(0.7)
+                # FOTO logo depois do clique
+                self._save_debug(
+                    f"data_depois_filtrar_{attempt}_{ft + 1}",
+                    f"clicked={filter_clicked} open={self._popup_filtro_data_open()}",
+                )
+                if not self._popup_filtro_data_open() and not self._locate_popup_filter_button():
+                    popup_closed = True
+                    logger.info("Filter aplicou — popup/botão sumiram")
+                    break
+                self._sleep(0.35)
+
+            # se botão ainda existe, forçar clique CDP mais uma vez
+            loc_btn = self._locate_popup_filter_button()
+            if loc_btn and loc_btn.get("x"):
+                logger.info("Filter ainda visível — CDP forçado")
+                self._save_debug(
+                    f"data_filter_forcado_{attempt}",
+                    f"btn ainda em {loc_btn}",
+                )
+                self._cdp_click_xy(loc_btn["x"], loc_btn["y"])
+                filter_clicked = True
+                self._sleep(0.8)
+                popup_closed = (
+                    not self._popup_filtro_data_open()
+                    and not self._locate_popup_filter_button()
+                )
+
+            self._trace(
+                f"data_apos_filter_btn_{attempt}",
+                f"filter_clicked={filter_clicked} popup_closed={popup_closed} "
+                f"pop_ok={pop_ok} Home={pop_ini} End={pop_fim}",
+                shot=True,
+            )
+            self._save_debug(
+                f"data_apos_filter_btn_{attempt}",
+                f"clicked={filter_clicked} closed={popup_closed}",
+            )
+
+            # exige ter clicado Filter (não só “parecer fechado”)
+            if not filter_clicked and not popup_closed:
                 logger.warning(
-                    "Filter do popup NÃO fechou o popup (tentativa %s) — não avança",
+                    "Filter do popup NÃO foi clicado (tentativa %s)",
                     attempt,
                 )
                 self._save_debug(f"data_filter_nao_aplicou_{attempt}")
-                # fecha com Close e recomeça
                 try:
                     d.execute_script(
                         """
@@ -3416,13 +3442,13 @@ class SitraxBot:
             self._wait_loader_gone(30)
             self._sleep(0.7)
 
-            # 5) valida chip — SE popup fechou com Home/End certos, OK
+            # 5) chip da barra + espera
             chip_now = ""
-            for _ in range(5):
+            for _ in range(6):
                 chip_now = self._read_date_chip_text()
                 if chip_now:
                     break
-                self._sleep(0.35)
+                self._sleep(0.4)
 
             chip_ok = self._date_chip_matches(data_ini, data_fim)
             if not chip_ok and chip_now:
@@ -3433,49 +3459,45 @@ class SitraxBot:
             self._trace(
                 f"data_apos_fill_{attempt}",
                 f"pedido {ini_br}→{fim_br} | chip={chip_now!r} "
-                f"pop_ok={pop_ok} chip_ok={chip_ok} popup_closed={popup_closed}",
+                f"pop_ok={pop_ok} chip_ok={chip_ok} "
+                f"filter_clicked={filter_clicked} popup_closed={popup_closed}",
                 shot=True,
             )
 
-            # espera chip da barra atualizar (AJAX após Filter do popup)
-            if popup_closed and pop_ok and not chip_ok:
-                for _wait in range(8):
-                    self._sleep(0.45)
-                    chip_now = self._read_date_chip_text()
-                    chip_ok = self._date_chip_matches(data_ini, data_fim)
-                    if not chip_ok and chip_now:
-                        dates = re.findall(r"\d{2}/\d{2}/\d{4}", chip_now)
-                        if (
-                            len(dates) >= 2
-                            and dates[0] == ini_br
-                            and dates[-1] == fim_br
-                        ):
-                            chip_ok = True
-                    if chip_ok:
-                        break
+            # sucesso se clicou Filter e Home/End estavam certos
+            if filter_clicked and pop_ok:
                 logger.info(
-                    "Após Filter popup, chip=%r ok=%s", chip_now, chip_ok
-                )
-
-            # sucesso: popup fechou com Home/End certos
-            # (chip vazio ainda conta se Home/End estavam OK e popup fechou)
-            if popup_closed and pop_ok:
-                logger.info(
-                    "Data filtro OK: %s → %s (chip=%r chip_ok=%s)",
+                    "Data filtro OK: %s → %s (chip=%r)",
                     ini_br,
                     fim_br,
                     chip_now,
-                    chip_ok,
                 )
                 self._trace(
                     "data_filtro_ok",
-                    f"{ini_br}→{fim_br} chip={chip_now!r}",
+                    f"{ini_br}→{fim_br} chip={chip_now!r} filter_clicked=1",
                     shot=True,
                 )
-                # Filter da BARRA (laranja grande) — carrega a grade
+                # Filter da BARRA + foto + espera ~3s
                 try:
+                    self._save_debug(
+                        f"data_antes_filter_barra_{attempt}",
+                        "Antes do Filter grande da barra",
+                    )
+                    self._trace(
+                        f"data_antes_filter_barra_{attempt}",
+                        "Clicando Filter da barra (laranja)",
+                        shot=True,
+                    )
                     self.click_filtrar()
-                    # Sitrax demora ~3s para atualizar registros após Filter (manual)
+                    self._save_debug(
+                        f"data_depois_filter_barra_{attempt}",
+                        "Depois do Filter da barra",
+                    )
+                    self._trace(
+                        f"data_depois_filter_barra_{attempt}",
+                        "Filter barra clicado — aguardando grade ~3s",
+                        shot=True,
+                    )
                     n_regs = self.wait_after_filter(
                         min_sec=3.2,
                         timeout=28.0,
@@ -3489,17 +3511,23 @@ class SitraxBot:
                         f"Showing={n_regs} após período {ini_br}→{fim_br}",
                         shot=True,
                     )
+                    self._save_debug(
+                        "data_apos_filter_grade",
+                        f"Showing={n_regs}",
+                    )
                 except Exception as e:
                     logger.warning("Filter barra após data: %s", e)
                     self._sleep(3.2)
                 return
 
             logger.warning(
-                "Data ainda errada (tentativa %s): chip=%r pop=%s→%s closed=%s",
+                "Data ainda errada (tentativa %s): chip=%r pop=%s→%s "
+                "clicked=%s closed=%s",
                 attempt,
                 chip_now,
                 pop_ini,
                 pop_fim,
+                filter_clicked,
                 popup_closed,
             )
 
