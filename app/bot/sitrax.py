@@ -2427,13 +2427,11 @@ class SitraxBot:
                 self._d().execute_script(
                     """
                     var body = ((document.body && document.body.innerText) || '');
-                    var b = body.toLowerCase();
                     if (/n[aã]o\\s+foram\\s+encontrados\\s+registros/i.test(body)) return true;
                     if (/no\\s+records?\\s+(were\\s+)?found/i.test(body)) return true;
                     if (/nenhum\\s+registro/i.test(body)) return true;
                     if (/mostrando\\s*:\\s*0\\s*registro/i.test(body)) return true;
                     if (/showing\\s*:\\s*0\\s*register/i.test(body)) return true;
-                    // toast laranja do Sitrax
                     var alerts = document.querySelectorAll(
                       '.alert, .toast, [class*="alert"], [class*="warning"], [role="alert"]'
                     );
@@ -2445,6 +2443,47 @@ class SitraxBot:
                     """
                 )
             )
+        except Exception:
+            return False
+
+    def showing_zero_records(self) -> bool:
+        """True se a grade mostra explicitamente 0 registros (PT/EN)."""
+        try:
+            return bool(
+                self._d().execute_script(
+                    """
+                    var body = ((document.body && document.body.innerText) || '');
+                    if (/mostrando\\s*:\\s*0\\b/i.test(body)) return true;
+                    if (/showing\\s*:\\s*0\\b/i.test(body)) return true;
+                    if (/\\b0\\s*registro/i.test(body) && !/\\b[1-9]\\d*\\s*registro/i.test(body))
+                      return true;
+                    if (/\\b0\\s*register/i.test(body) && !/\\b[1-9]\\d*\\s*register/i.test(body))
+                      return true;
+                    return false;
+                    """
+                )
+            )
+        except Exception:
+            return False
+
+    def grid_has_data_rows(self) -> bool:
+        """True se há linhas com data GPS na grade (scrape falhou mas tem dado)."""
+        try:
+            n = self._d().execute_script(
+                """
+                var DATE_RE = /\\d{2}\\/\\d{2}\\/\\d{4}\\s+\\d{2}:\\d{2}/;
+                var trs = document.querySelectorAll(
+                  '.dataTables_scrollBody tbody tr, table tbody tr'
+                );
+                var c = 0;
+                for (var i = 0; i < trs.length; i++) {
+                  var t = trs[i].innerText || trs[i].textContent || '';
+                  if (DATE_RE.test(t)) c++;
+                }
+                return c;
+                """
+            )
+            return int(n or 0) > 0
         except Exception:
             return False
 
@@ -2515,7 +2554,8 @@ class SitraxBot:
         """
         placa_u = self._norm_placa(placa)
         last_rows: list = []
-        for attempt in range(3):
+        # Até 2 tentativas: 2ª só se NÃO for "Mostrando: 0" (zero real = fim)
+        for attempt in range(2):
             try:
                 self.prepare_historico_warm(
                     placa_u,
@@ -2542,7 +2582,7 @@ class SitraxBot:
                 )
             except Exception:
                 pass
-            self._sleep(0.4)
+            self._sleep(0.35)
 
             if not self.vehicle_chip_has_plate(placa_u):
                 logger.warning(
@@ -2564,22 +2604,24 @@ class SitraxBot:
             except Exception as e:
                 logger.warning("re-Filter %s: %s", placa_u, e)
 
-            n_hint = self.wait_positions_grid(timeout=22)
+            n_hint = self.wait_positions_grid(timeout=18)
             self.try_scroll_all()
             rows = self.scrape_positions_table()
             last_rows = rows or []
             n_scrape = len(last_rows)
-            empty_ok = self.sitrax_says_no_records() or (
-                n_hint == 0 and self.vehicle_chip_has_plate(placa_u)
+            zero_real = (
+                self.sitrax_says_no_records()
+                or self.showing_zero_records()
+                or n_hint == 0
             )
 
             logger.info(
-                "Frota %s tentativa %s: grid~%s scrape=%s empty_ok=%s",
+                "Frota %s tentativa %s: grid~%s scrape=%s zero_real=%s",
                 placa_u,
                 attempt + 1,
                 n_hint,
                 n_scrape,
-                empty_ok,
+                zero_real,
             )
 
             if n_scrape > 0:
@@ -2590,43 +2632,32 @@ class SitraxBot:
                 )
                 return last_rows
 
-            # Sitrax confirmou: sem registros no período → resultado válido
-            if empty_ok and self.vehicle_chip_has_plate(placa_u):
+            # Sitrax mostrou 0 → resultado válido, NÃO tenta de novo
+            if zero_real and self.vehicle_chip_has_plate(placa_u):
                 self._trace(
                     f"frota_sem_dados_{placa_u}",
-                    f"{placa_u}: Sitrax sem registros no período (0 pts — OK)",
+                    f"{placa_u}: Sitrax 0 registros no período — OK (sem retry)",
                     ok=True,
                     shot=True,
                 )
                 return []
 
-            # 0 sem confirmação: tenta Filter de novo
-            try:
-                self.click_filtrar()
-                self.wait_positions_grid(timeout=12)
-                self.try_scroll_all()
-                rows = self.scrape_positions_table()
-                last_rows = rows or []
-                if last_rows:
-                    return last_rows
-                if self.sitrax_says_no_records() and self.vehicle_chip_has_plate(
-                    placa_u
-                ):
-                    self._trace(
-                        f"frota_sem_dados_{placa_u}",
-                        f"{placa_u}: 0 registros confirmados pelo Sitrax",
-                        ok=True,
-                    )
-                    return []
-            except Exception:
-                pass
+            # Retry só se a grade TEM dados e o scrape falhou (ou chip duvidoso)
+            if attempt == 0 and self.grid_has_data_rows():
+                self._trace(
+                    f"frota_scrape_miss_{placa_u}",
+                    f"{placa_u}: grade com dados mas scrape 0 — 1 retry",
+                    ok=False,
+                )
+                continue
 
             self._save_debug(
                 f"frota_zero_{placa_u}_t{attempt+1}",
                 f"0 posições para {placa_u} tentativa {attempt+1} "
-                f"(empty_ok={empty_ok})",
+                f"(zero_real={zero_real})",
                 ok=False,
             )
+            break
 
         return last_rows
 

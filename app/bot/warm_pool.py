@@ -533,7 +533,7 @@ class WarmPool:
             self.start_keeper()
 
     def list_fleet_plates(self) -> list[dict]:
-        """Usa Chrome 1 permanente para listar a frota (sem Chrome extra)."""
+        """Lista frota com Chrome 1 (modo isolado — devolve a Veículos)."""
         self.ensure_both()
         slot = self._slots[0]
         with slot.lock:
@@ -544,26 +544,30 @@ class WarmPool:
             was = slot.status
             slot.status = "busy"
             try:
-                if not bot._on_posicoes_screen():
-                    bot.open_posicoes()
-                bot._close_date_popup_if_open()
-                if not bot._vehicle_modal_open():
-                    bot.open_vehicle_selector()
-                bot.load_vehicle_list()
-                vehicles = bot.list_plates()
-                try:
-                    bot._d().execute_script(
-                        "if (typeof hideModalSearchVeiculo === 'function') "
-                        "hideModalSearchVeiculo();"
-                    )
-                except Exception:
-                    pass
-                return vehicles
+                return self.list_plates_on_bot(bot)
             finally:
                 try:
                     self._return_slot_to_vehicles(slot)
                 except Exception:
                     slot.status = was
+
+    def list_plates_on_bot(self, bot: Any) -> list[dict]:
+        """Lista placas usando um bot já emprestado (não devolve o slot)."""
+        if not bot._on_posicoes_screen():
+            bot.open_posicoes()
+        bot._close_date_popup_if_open()
+        if not bot._vehicle_modal_open():
+            bot.open_vehicle_selector()
+        bot.load_vehicle_list()
+        vehicles = bot.list_plates()
+        try:
+            bot._d().execute_script(
+                "if (typeof hideModalSearchVeiculo === 'function') "
+                "hideModalSearchVeiculo();"
+            )
+        except Exception:
+            pass
+        return vehicles
 
 
 warm_pool = WarmPool(n_slots=PERMANENT_SLOTS)

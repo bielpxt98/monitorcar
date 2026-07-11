@@ -193,9 +193,15 @@ def _run_job(modo: str, placa: str, d_ini: date, d_fim: date):
 
     try:
         with TempWorkspace(prefix="sitrax_frota_") as tmp:
-            # Lista frota com Chrome permanente (sem 3º browser)
-            _JOB["message"] = "Listando frota (Chrome permanente)…"
-            vehicles = warm_pool.list_fleet_plates()
+            # 1) Empresta os 2 JÁ (sem ociosidade do C2 na listagem)
+            borrowed = warm_pool.borrow_for_fleet()
+            _JOB["message"] = "Frota: listando placas e iniciando 2 Chromes…"
+
+            # 2) Lista rápido no C1 (C2 já está “frota”, pronto para barreira)
+            bot0 = borrowed[0][1] if borrowed else None
+            if bot0 is None:
+                raise RuntimeError("Nenhum Chrome permanente disponível para frota.")
+            vehicles = warm_pool.list_plates_on_bot(bot0)
             vehicles = [
                 v
                 for v in vehicles
@@ -220,7 +226,7 @@ def _run_job(modo: str, placa: str, d_ini: date, d_fim: date):
             debug_session.step(
                 "frota_lista",
                 f"Frota: {len(vehicles)} veículo(s) — {N_WORKERS} Chromes "
-                f"PERMANENTES round-robin. "
+                f"PERMANENTES (partida simultânea). "
                 + " | ".join(
                     f"C{i+1}: {', '.join(w_preview[i][:8])}"
                     + ("…" if len(w_preview[i]) > 8 else "")
@@ -230,11 +236,8 @@ def _run_job(modo: str, placa: str, d_ini: date, d_fim: date):
                 ok=True,
                 screenshot=False,
             )
-
-            # Empresta os 2 já logados (sem fechar / sem login de novo)
-            borrowed = warm_pool.borrow_for_fleet()
             _JOB["message"] = (
-                f"Frota: 0/{len(vehicles)} — 2 Chromes permanentes em paralelo…"
+                f"Frota: 0/{len(vehicles)} — 2 Chromes em paralelo (já)…"
             )
 
             def _msg(m: str) -> None:

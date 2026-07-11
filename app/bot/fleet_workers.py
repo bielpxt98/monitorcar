@@ -89,6 +89,7 @@ def _run_one_worker(
     existing_bot: Any = None,
     keep_alive: bool = False,
     on_bot_replaced: Optional[Any] = None,
+    start_barrier: Optional[threading.Barrier] = None,
 ) -> list[PlateResult]:
     """Um Chrome processa sua fatia; preferência: bot permanente (keep_alive)."""
     import time as _time
@@ -100,6 +101,11 @@ def _run_one_worker(
 
     results: list[PlateResult] = []
     if not assigned:
+        if start_barrier is not None:
+            try:
+                start_barrier.wait(timeout=120)
+            except Exception:
+                pass
         return results
 
     placas = [v["placa"] for _, v in assigned]
@@ -124,7 +130,7 @@ def _run_one_worker(
 
     def _start() -> Any:
         nonlocal bot
-        # reutiliza permanente se ainda vivo
+        # reutiliza permanente se ainda vivo — SEM sleep (partida juntos)
         if bot is not None:
             try:
                 if bot.alive():
@@ -144,13 +150,13 @@ def _run_one_worker(
             quiet=True,
             low_memory=True,
         )
-        _time.sleep(worker_id * 2.5)
+        # só atrasa login FRIOS (permanente morto); permanentes não passam aqui
         with _LOGIN_LOCK:
             b.start()
             b.login()
-            _time.sleep(1.2)
+            _time.sleep(0.8)
         b.open_posicoes()
-        b._sleep(0.8)
+        b._sleep(0.5)
         debug_session.step(
             f"worker{worker_id+1}_pronto",
             f"Chrome {worker_id+1} logado em Posições — "
@@ -170,7 +176,6 @@ def _run_one_worker(
         nonlocal bot
         if bot is None:
             return
-        # permanentes: não fecha no fim; só em crash (substitui)
         if keep_alive and bot is existing_bot:
             return
         try:
@@ -181,6 +186,19 @@ def _run_one_worker(
 
     try:
         bot = _start()
+        # Barreira: os 2 saem da largada no mesmo instante
+        if start_barrier is not None:
+            try:
+                debug_session.step(
+                    f"w{worker_id+1}_barreira",
+                    f"Chrome {worker_id+1} pronto — aguarda largada simultânea",
+                    ok=True,
+                    screenshot=False,
+                )
+                start_barrier.wait(timeout=180)
+            except Exception as e:
+                logger.warning("Barreira worker %s: %s", worker_id + 1, e)
+
         for j, (order, v) in enumerate(assigned):
             pl = v["placa"]
             with progress_lock:
@@ -200,37 +218,36 @@ def _run_one_worker(
                 attempts += 1
                 try:
                     if bot is None or not bot.alive():
-                        _kill()
+                        if bot is not None:
+                            try:
+                                bot.close()
+                            except Exception:
+                                pass
+                            bot = None
                         bot = _start()
 
                     assert bot is not None
-                    # Fluxo robusto: chip + Filter + espera grade + scrape
                     rows = bot.fetch_positions_for_fleet_plate(
                         pl,
                         data_ini=data_ini,
                         data_fim=data_fim,
-                        clear_previous=(j > 0),
+                        clear_previous=(j > 0 or order > 0),
                     )
                     positions = positions_from_rows(rows)
                     n_pts = len([p for p in positions if p.when])
-                    # 0 pts com chip + mensagem Sitrax = dia sem GPS (válido)
+                    # 0 real no Sitrax (Mostrando: 0) = OK, SEM reabrir/retry extra
                     empty_legit = n_pts == 0 and (
                         bot.sitrax_says_no_records()
-                        or bot.vehicle_chip_has_plate(pl)
+                        or bot.showing_zero_records()
                     )
 
-                    if n_pts == 0 and not empty_legit:
-                        # só reabre se NÃO for zero legítimo do Sitrax
+                    # Retry SÓ se scrape vazio MAS a grade tem linhas (bug de leitura)
+                    if n_pts == 0 and not empty_legit and bot.grid_has_data_rows():
                         logger.warning(
-                            "Worker %s %s: 0 pts suspeito — reabre Posições",
+                            "Worker %s %s: grade com dados mas scrape 0 — 1 retry",
                             worker_id + 1,
                             pl,
                         )
-                        try:
-                            bot.open_posicoes()
-                            bot._sleep(1)
-                        except Exception:
-                            pass
                         rows = bot.fetch_positions_for_fleet_plate(
                             pl,
                             data_ini=data_ini,
@@ -241,8 +258,26 @@ def _run_one_worker(
                         n_pts = len([p for p in positions if p.when])
                         empty_legit = n_pts == 0 and (
                             bot.sitrax_says_no_records()
-                            or bot.vehicle_chip_has_plate(pl)
+                            or bot.showing_zero_records()
                         )
+                    elif n_pts == 0 and not empty_legit:
+                        # chip errado / filtro falhou — 1 retry
+                        if not bot.vehicle_chip_has_plate(pl):
+                            rows = bot.fetch_positions_for_fleet_plate(
+                                pl,
+                                data_ini=data_ini,
+                                data_fim=data_fim,
+                                clear_previous=True,
+                            )
+                            positions = positions_from_rows(rows)
+                            n_pts = len([p for p in positions if p.when])
+                            empty_legit = n_pts == 0 and (
+                                bot.sitrax_says_no_records()
+                                or bot.showing_zero_records()
+                            )
+                        else:
+                            # chip ok + 0 linhas = trata como vazio legítimo
+                            empty_legit = True
 
                     texto = build_narrative_report(
                         pl,
@@ -251,7 +286,6 @@ def _run_one_worker(
                         cliente=v.get("cliente", ""),
                     )
                     if n_pts == 0 and empty_legit:
-                        # não tratar como erro — carro sem pontos no dia
                         pass
                     elif n_pts == 0:
                         texto = (
@@ -266,7 +300,6 @@ def _run_one_worker(
                         data_ref=data_ref,
                         cliente=v.get("cliente", ""),
                     )
-                    # ok=True mesmo com 0 pts se Sitrax confirmou vazio
                     ok_result = n_pts > 0 or empty_legit
                     results.append(
                         PlateResult(
@@ -287,7 +320,7 @@ def _run_one_worker(
                         step_name = f"w{worker_id+1}_vazio_ok_{pl}"
                         step_msg = (
                             f"Chrome {worker_id+1}: {pl} → 0 pts "
-                            "(Sitrax sem registros no período — OK)"
+                            "(Sitrax Mostrando: 0 — OK, sem retry)"
                         )
                     else:
                         step_name = f"w{worker_id+1}_zero_{pl}"
@@ -429,6 +462,9 @@ def run_fleet_parallel(
                 f"Frota {total_done}/{total} — " + " · ".join(parts)
             )
 
+    # Largada simultânea: os N workers esperam uns aos outros e saem juntos
+    start_barrier = threading.Barrier(len(active), timeout=180)
+
     with ThreadPoolExecutor(max_workers=len(active)) as pool:
         futs = {
             pool.submit(
@@ -444,6 +480,7 @@ def run_fleet_parallel(
                 bot_by_id.get(wid),
                 keep_alive,
                 on_bot_replaced,
+                start_barrier,
             ): wid
             for wid, bucket in active
         }
