@@ -1711,40 +1711,64 @@ class SitraxBot:
         self._save_debug(f"veiculo_ok_{placa_u}")
         return {"placa": placa_u}
 
+    # —— Filtro de data Sitrax (chip → popup → calendário range) ——
+
+    _MES_PT = (
+        "janeiro",
+        "fevereiro",
+        "março",
+        "abril",
+        "maio",
+        "junho",
+        "julho",
+        "agosto",
+        "setembro",
+        "outubro",
+        "novembro",
+        "dezembro",
+    )
+    _MES_EN = (
+        "january",
+        "february",
+        "march",
+        "april",
+        "may",
+        "june",
+        "july",
+        "august",
+        "september",
+        "october",
+        "november",
+        "december",
+    )
+
     def _read_date_chip_text(self) -> str:
-        """
-        Texto do chip Data/Date na barra de filtros.
-        PT: 'Data: 10/07/2026 00:00:00 Até 11/07/2026 23:59:59'
-        EN: 'Date: 11/07/2026 00:00:00 Until 11/07/2026 23:59:59'
-        Não confunde com datas da tabela.
-        """
+        """Lê o chip Data/Date da barra (PT ou EN)."""
         d = self._d()
         try:
             chip = d.execute_script(
                 """
                 function norm(s){ return (s||'').replace(/\\s+/g,' ').trim(); }
-                var best = '';
-                var nodes = document.querySelectorAll('a,span,div,button,label,li,td,p');
+                var best = '', bestScore = 1e9;
+                var nodes = document.querySelectorAll('*');
                 for (var i=0;i<nodes.length;i++){
                   var el = nodes[i];
+                  if (el.children && el.children.length > 8) continue;
                   var t = norm(el.innerText || el.textContent);
-                  if (!t || t.length > 110 || t.length < 8) continue;
-                  // chip da barra: Data: / Date: + pelo menos 1 data
-                  if (!/^(Data|Date)\\s*:/i.test(t) && t.indexOf('Data:') < 0 && t.indexOf('Date:') < 0) {
-                    // aceita se começa com Data/Date e tem data
-                    if (!(t.indexOf('Data') === 0 || t.indexOf('Date') === 0)) continue;
-                  }
+                  if (!t || t.length < 10 || t.length > 140) continue;
                   if (!/\\d{2}\\/\\d{2}\\/\\d{4}/.test(t)) continue;
-                  if (t.indexOf('Data') < 0 && t.indexOf('Date') < 0) continue;
-                  // rejeita blocos com várias linhas / tabela
-                  if ((t.match(/\\n/g)||[]).length > 2) continue;
-                  if (t.indexOf('Mostrando') >= 0 || t.indexOf('Showing') >= 0) continue;
-                  if (t.indexOf('Veículo') >= 0 || t.indexOf('Vehicle') >= 0) continue;
-                  if (t.indexOf('Filtro Data') >= 0 || t.indexOf('Date Filter') >= 0) continue;
+                  // Date: ... Until ...  OU  Data: ... Até ...
+                  var isChip = /\\bDate\\s*:/i.test(t) || /\\bData\\s*:/i.test(t);
+                  if (!isChip) continue;
+                  if (/Ve[ií]culo|Vehicle|Mostrando|Showing|Filtro\\s*Data|Date\\s*Filter/i.test(t)
+                      && !/^\\s*(Data|Date)\\s*:/i.test(t)) continue;
+                  // preferir nós curtos só com o chip
+                  if (/GPS|Parked|Normal|Estacionado|Registro/i.test(t)) continue;
                   var r = el.getBoundingClientRect();
-                  if (r.height <= 0 || r.height > 70) continue;
-                  if (r.top > 220) continue; // barra de filtros no topo
-                  if (!best || t.length < best.length) best = t;
+                  if (r.width < 30 || r.height < 5) continue;
+                  if (r.top > 350) continue;
+                  var score = t.length + r.top * 0.01;
+                  if (score < bestScore){ bestScore = score; best = t; }
                 }
                 return best;
                 """
@@ -1753,34 +1777,9 @@ class SitraxBot:
                 return re.sub(r"\s+", " ", str(chip)).strip()
         except Exception:
             pass
-        best = ""
-        for el in d.find_elements(
-            By.XPATH,
-            "//*[contains(.,'Data:') or contains(.,'Date:')]",
-        ):
-            try:
-                if not el.is_displayed():
-                    continue
-                t = re.sub(r"\s+", " ", (el.text or "").strip())
-                if not t or len(t) > 110:
-                    continue
-                if not re.search(r"\d{2}/\d{2}/\d{4}", t):
-                    continue
-                if not (t.startswith("Data") or t.startswith("Date") or "Data:" in t or "Date:" in t):
-                    continue
-                if "Veículo" in t or "Vehicle" in t or "Filtro Data" in t:
-                    continue
-                h = el.size.get("height", 99) or 99
-                if h > 70:
-                    continue
-                if not best or len(t) < len(best):
-                    best = t
-            except Exception:
-                continue
-        return best
+        return ""
 
     def _date_chip_matches(self, data_ini: date, data_fim: date) -> bool:
-        """True se o chip já reflete o período (início e fim)."""
         chip = self._read_date_chip_text()
         if not chip:
             return False
@@ -1789,430 +1788,556 @@ class SitraxBot:
             return False
         ini_br = data_ini.strftime("%d/%m/%Y")
         fim_br = data_fim.strftime("%d/%m/%Y")
-        # 1 data no chip: só OK se início==fim e bate
         if len(dates) == 1:
             return data_ini == data_fim and dates[0] == ini_br
-        # 2+ datas: primeira = início, última = fim
         return dates[0] == ini_br and dates[-1] == fim_br
 
     def _click_date_chip(self) -> bool:
-        """Clica no chip 'Data:' / 'Date:' da barra (abre popup Filtro Data)."""
+        """
+        Clica no chip 'Data:' / 'Date:' da barra de filtros.
+        (ex.: Date: 11/07/2026 00:00:00 Until 11/07/2026 23:59:59)
+        """
         d = self._d()
         try:
             clicked = d.execute_script(
                 """
                 function norm(s){ return (s||'').replace(/\\s+/g,' ').trim(); }
-                var nodes = document.querySelectorAll('a,span,div,button,label,li');
                 var candidates = [];
+                var nodes = document.querySelectorAll('a,span,div,button,label,li,p,td');
                 for (var i=0;i<nodes.length;i++){
                   var el = nodes[i];
                   var t = norm(el.innerText || el.textContent);
-                  if (!t || t.length > 110 || t.length < 6) continue;
+                  if (!t || t.length < 8 || t.length > 140) continue;
                   if (!/\\d{2}\\/\\d{2}\\/\\d{4}/.test(t)) continue;
-                  // chip Data / Date — NÃO Veículo
-                  var isDate = (t.indexOf('Data:') >= 0 || t.indexOf('Date:') >= 0
-                    || /^Data\\b/i.test(t) || /^Date\\b/i.test(t));
-                  if (!isDate) continue;
-                  if (t.indexOf('Veículo') >= 0 || t.indexOf('Vehicle') >= 0) continue;
-                  if (t.indexOf('Filtro Data') >= 0 || t.indexOf('Date Filter') >= 0) continue;
+                  if (!(/\\bDate\\s*:/i.test(t) || /\\bData\\s*:/i.test(t))) continue;
+                  if (/Ve[ií]culo\\s*:|Vehicle\\s*:/i.test(t)) continue;
+                  if (/Filtro\\s*Data|Date\\s*Filter/i.test(t) && t.length > 80) continue;
+                  if (/Mostrando|Showing|Parked|Estacionado|GPS Date/i.test(t)) continue;
                   var r = el.getBoundingClientRect();
-                  if (r.width < 40 || r.height < 8 || r.height > 70) continue;
-                  if (r.top > 220) continue;
-                  candidates.push({el: el, t: t, score: r.top + (t.length * 0.01)});
+                  if (r.width < 40 || r.height < 6 || r.height > 120) continue;
+                  if (r.top > 400 || r.bottom < 0) continue;
+                  // preferir o menor nó (folha) que ainda tem o texto do chip
+                  candidates.push({el:el, t:t, len:t.length, top:r.top});
                 }
-                candidates.sort(function(a,b){ return a.score - b.score; });
-                if (!candidates.length) return null;
-                var c = candidates[0].el;
-                c.scrollIntoView({block:'center'});
-                c.click();
-                return candidates[0].t;
+                candidates.sort(function(a,b){
+                  return (a.len - b.len) || (a.top - b.top);
+                });
+                if (!candidates.length) return {ok:false, n:0};
+                var c = candidates[0];
+                try { c.el.scrollIntoView({block:'center', inline:'nearest'}); } catch(e){}
+                c.el.click();
+                return {ok:true, t:c.t, n:candidates.length};
                 """
             )
-            if clicked:
-                logger.info("Clicou chip Data/Date: %s", clicked)
+            if clicked and clicked.get("ok"):
+                logger.info("Clicou chip Data/Date: %s", clicked.get("t"))
                 return True
+            logger.warning("Chip Data/Date JS: %s", clicked)
         except Exception as e:
             logger.warning("JS click chip data: %s", e)
 
-        # Selenium fallback
+        # Selenium: qualquer elemento com Date: / Data: + data
         for el in d.find_elements(
             By.XPATH,
-            "//*[contains(normalize-space(.),'Data:') or contains(normalize-space(.),'Date:')]",
+            "//*[contains(.,'Date:') or contains(.,'Data:')]",
         ):
             try:
+                t = re.sub(r"\s+", " ", (el.text or "").strip())
+                if len(t) > 140 or len(t) < 8:
+                    continue
+                if not re.search(r"\d{2}/\d{2}/\d{4}", t):
+                    continue
+                if not (re.search(r"\bDate\s*:", t, re.I) or re.search(r"\bData\s*:", t, re.I)):
+                    continue
+                if re.search(r"Vehicle\s*:|Ve[ií]culo\s*:", t, re.I):
+                    continue
                 if not el.is_displayed():
                     continue
-                t = re.sub(r"\s+", " ", (el.text or "").strip())
-                if len(t) > 110 or not re.search(r"\d{2}/\d{2}/\d{4}", t):
-                    continue
-                if "Veículo" in t or "Vehicle" in t:
-                    continue
-                if not ("Data" in t or "Date" in t):
-                    continue
-                h = el.size.get("height", 99) or 99
-                if h > 70:
-                    continue
                 self._click(el)
-                logger.info("Clicou chip Data (selenium): %s", t[:80])
+                logger.info("Clicou chip Data (selenium): %s", t[:90])
                 return True
             except Exception:
                 continue
         return False
 
-    def _fill_date_popup(self, ini_br: str, fim_br: str) -> bool:
-        """
-        Preenche Início/Fim no popup 'Filtro Data' / 'Date Filter'.
-        Fluxo real Sitrax:
-          Início: DD/MM/AAAA 00:00:00
-          Fim:    DD/MM/AAAA 23:59:59
-          [Fechar] [Filtrar]
-        """
+    def _wait_filtro_data_popup(self, timeout: float = 4.0) -> bool:
+        """Espera o popup 'Filtro Data' / 'Date Filter'."""
         d = self._d()
-        ini_val = f"{ini_br} 00:00:00"
-        fim_val = f"{fim_br} 23:59:59"
-
-        result = None
-        try:
-            result = d.execute_script(
-                """
-                var iniVal = arguments[0], fimVal = arguments[1];
-                function norm(s){ return (s||'').replace(/\\s+/g,' ').trim(); }
-                function setInput(el, v){
-                  if (!el) return false;
-                  try {
-                    el.focus();
-                    el.removeAttribute('readonly');
-                    el.readOnly = false;
-                    var setter = Object.getOwnPropertyDescriptor(
-                      window.HTMLInputElement.prototype, 'value');
-                    if (setter && setter.set) setter.set.call(el, v);
-                    else el.value = v;
-                    el.dispatchEvent(new Event('input', {bubbles:true}));
-                    el.dispatchEvent(new Event('change', {bubbles:true}));
-                    el.dispatchEvent(new Event('blur', {bubbles:true}));
-                    // PrimeFaces / JSF
-                    if (window.jQuery) {
-                      try { jQuery(el).val(v).trigger('change').trigger('input'); } catch(e){}
-                    }
-                    return true;
-                  } catch(e){ return false; }
-                }
-                function findPopup(){
-                  var best = null, bestLen = 1e9;
-                  var all = document.querySelectorAll('div,form,section,table,ul,span');
-                  for (var i=0;i<all.length;i++){
-                    var el = all[i];
-                    var t = norm(el.innerText || '');
-                    if (t.length < 20 || t.length > 600) continue;
-                    var hasTitle = /Filtro\\s*Data|Date\\s*Filter|Filtro\\s*data/i.test(t);
-                    var hasIni = /In[ií]cio|Start\\s*:|From\\s*:/i.test(t);
-                    var hasFim = /\\bFim\\b|End\\s*:|Until|At[eé]/i.test(t);
-                    if (!(hasTitle || (hasIni && hasFim))) continue;
-                    if (!hasIni) continue;
-                    var r = el.getBoundingClientRect();
-                    if (r.width < 120 || r.height < 40) continue;
-                    if (t.length < bestLen){ best = el; bestLen = t.length; }
-                  }
-                  return best;
-                }
-                var popup = findPopup();
-                if (!popup) return {ok:false, reason:'popup_nao_achado'};
-
-                var filledIni = false, filledFim = false;
-                var inputs = Array.prototype.slice.call(
-                  popup.querySelectorAll('input:not([type=hidden]):not([type=button]):not([type=submit]):not([type=checkbox]):not([type=radio])')
-                );
-                // também inputs com date no id/name em todo o doc se popup vazio
-                if (inputs.length < 2){
-                  var extra = document.querySelectorAll('input');
-                  for (var j=0;j<extra.length;j++){
-                    var x = extra[j];
-                    var idn = ((x.id||'')+(x.name||'')+(x.className||'')).toLowerCase();
-                    var typ = (x.type||'text').toLowerCase();
-                    if (typ === 'hidden' || typ === 'button' || typ === 'submit') continue;
-                    var r = x.getBoundingClientRect();
-                    if (r.width < 4 || r.height < 4) continue;
-                    if (/data|date|inicio|início|start|fim|end|until|calendar|calendario/.test(idn)
-                        || /\\d{2}\\/\\d{2}\\/\\d{4}/.test(x.value||'')) {
-                      if (inputs.indexOf(x) < 0) inputs.push(x);
-                    }
-                  }
-                }
-
-                function kindOf(inp){
-                  var meta = [
-                    inp.id||'', inp.name||'', inp.placeholder||'',
-                    inp.getAttribute('aria-label')||'', inp.title||'',
-                    inp.className||''
-                  ].join(' ').toLowerCase();
-                  // label for=
-                  if (inp.id){
-                    var lab = document.querySelector("label[for='"+inp.id+"']");
-                    if (lab) meta += ' ' + norm(lab.innerText).toLowerCase();
-                  }
-                  // texto do pai (Início: / Fim:)
-                  var p = inp.parentElement;
-                  for (var k=0;k<4 && p;k++){
-                    var pt = norm(p.innerText||'').toLowerCase().slice(0, 80);
-                    meta += ' ' + pt;
-                    p = p.parentElement;
-                  }
-                  // linha anterior / irmãos
-                  var prev = inp.previousElementSibling;
-                  if (prev) meta += ' ' + norm(prev.innerText||'').toLowerCase();
-                  if (/in[ií]cio|start|from|de\\s*:|datainicio|data_ini|datefrom|date_from|begin/.test(meta)
-                      && !/\\bfim\\b|end\\s*:|dateend|datafim|data_fim/.test(meta.replace(/in[ií]cio[^\\n]{0,20}/,'')))
-                    return 'ini';
-                  if (/\\bfim\\b|end\\s*:|until|at[eé]|dateend|datafim|data_fim|dateto|date_to/.test(meta))
-                    return 'fim';
-                  return null;
-                }
-
-                // 1) por rótulo
-                for (var i=0;i<inputs.length;i++){
-                  var knd = kindOf(inputs[i]);
-                  if (knd === 'ini' && !filledIni){
-                    filledIni = setInput(inputs[i], iniVal);
-                  } else if (knd === 'fim' && !filledFim){
-                    filledFim = setInput(inputs[i], fimVal);
-                  }
-                }
-                // 2) ordem: 1º = início, 2º = fim (campos de data no popup)
-                if (!filledIni || !filledFim){
-                  var dateLike = [];
-                  for (var i=0;i<inputs.length;i++){
-                    var el = inputs[i];
-                    var r = el.getBoundingClientRect();
-                    if (r.width < 4) continue;
-                    var v = el.value || '';
-                    var typ = (el.type||'text').toLowerCase();
-                    if (typ === 'date' || typ === 'datetime-local' || typ === 'text' || typ === 'tel' || !typ){
-                      if (/\\d{2}\\/\\d{2}\\/\\d{4}/.test(v) || typ.indexOf('date')===0 || dateLike.length < 2)
-                        dateLike.push(el);
-                    }
-                  }
-                  // só inputs dentro do popup se possível
-                  var inPop = dateLike.filter(function(el){ return popup.contains(el); });
-                  if (inPop.length >= 1) dateLike = inPop;
-                  if (!filledIni && dateLike[0]) filledIni = setInput(dateLike[0], iniVal);
-                  if (!filledFim && dateLike[1]) filledFim = setInput(dateLike[1], fimVal);
-                  // se só 1 campo e mesmo dia, ok; se multi-dia precisa 2
-                }
-
-                // 3) clicar textos roxos "Início: DD/MM..." / "Fim: ..." e digitar
-                // (alguns Sitrax usam span clicável em vez de input)
-                function clickAndType(labelRe, value){
-                  var nodes = popup.querySelectorAll('span,a,div,td,label,p,b,strong');
-                  for (var i=0;i<nodes.length;i++){
-                    var t = norm(nodes[i].innerText||'');
-                    if (t.length > 60) continue;
-                    if (!labelRe.test(t)) continue;
-                    if (!/\\d{2}\\/\\d{2}\\/\\d{4}/.test(t) && t.length > 25) continue;
-                    nodes[i].click();
-                    var act = document.activeElement;
-                    if (act && (act.tagName === 'INPUT' || act.tagName === 'TEXTAREA')){
-                      setInput(act, value);
-                      return true;
-                    }
-                    // input irmão / filho
-                    var inp = nodes[i].querySelector('input')
-                      || (nodes[i].parentElement && nodes[i].parentElement.querySelector('input'));
-                    if (inp){ setInput(inp, value); return true; }
-                  }
-                  return false;
-                }
-                if (!filledIni) filledIni = clickAndType(/In[ií]cio|Start/i, iniVal);
-                if (!filledFim) filledFim = clickAndType(/\\bFim\\b|End|Until/i, fimVal);
-
-                // Botão Filtrar DENTRO do popup (não o Filter grande da barra)
-                var btnClicked = false;
-                var btns = popup.querySelectorAll('button,a,input[type=button],input[type=submit],span');
-                for (var i=0;i<btns.length;i++){
-                  var b = btns[i];
-                  var bt = norm(b.innerText || b.value || '');
-                  if (!/^(Filtrar|Filter|Aplicar|Apply|OK|Ok)$/i.test(bt)) continue;
-                  // evita Fechar
-                  if (/fechar|close|cancel/i.test(bt)) continue;
-                  try {
-                    b.click();
-                    btnClicked = true;
-                    break;
-                  } catch(e){}
-                }
-                // se não achou no popup, botões próximos com texto Filtrar e ancestrais de data
-                if (!btnClicked){
-                  var allB = document.querySelectorAll('button,a,input[type=button]');
-                  for (var i=0;i<allB.length;i++){
-                    var b = allB[i];
-                    var bt = norm(b.innerText || b.value || '');
-                    if (bt !== 'Filtrar' && bt !== 'Filter') continue;
-                    var par = b.parentElement;
-                    var ctx = '';
-                    for (var k=0;k<5 && par;k++){ ctx += ' ' + norm(par.innerText||'').slice(0,120); par = par.parentElement; }
-                    if (/Filtro\\s*Data|Date\\s*Filter|In[ií]cio/i.test(ctx)){
-                      try { b.click(); btnClicked = true; break; } catch(e){}
-                    }
-                  }
-                }
-
-                return {
-                  ok: !!(filledIni || filledFim || btnClicked),
-                  filledIni: !!filledIni,
-                  filledFim: !!filledFim,
-                  btn: !!btnClicked,
-                  nInputs: inputs.length,
-                  popupText: norm(popup.innerText).slice(0, 160)
-                };
-                """,
-                ini_val,
-                fim_val,
-            )
-        except Exception as e:
-            logger.warning("JS fill date popup: %s", e)
-            result = None
-
-        if result:
-            logger.info("Popup data fill: %s", result)
-            if result.get("ok"):
-                # reforço Selenium nos inputs se JS marcou falta de um lado
-                if not result.get("filledIni") or not result.get("filledFim"):
-                    self._fill_date_inputs_selenium(ini_val, fim_val)
-                return True
-
-        # Fallback Selenium puro
-        ok = self._fill_date_inputs_selenium(ini_val, fim_val)
-        ok = self._click_popup_filtrar() or ok
-        return ok
-
-    def _fill_date_inputs_selenium(self, ini_val: str, fim_val: str) -> bool:
-        """Fallback: preenche inputs visíveis Início/Fim com teclado."""
-        d = self._d()
-        from selenium.webdriver.common.keys import Keys
-
-        filled = 0
-        inputs = []
-        for inp in d.find_elements(By.CSS_SELECTOR, "input"):
+        end = time.time() + timeout
+        while time.time() < end:
             try:
-                if not inp.is_displayed():
-                    continue
-                typ = (inp.get_attribute("type") or "text").lower()
-                if typ in ("hidden", "button", "submit", "checkbox", "radio", "file"):
-                    continue
-                inputs.append(inp)
-            except Exception:
-                continue
-
-        def meta(inp) -> str:
-            parts = [
-                inp.get_attribute("id") or "",
-                inp.get_attribute("name") or "",
-                inp.get_attribute("placeholder") or "",
-            ]
-            try:
-                parts.append(
-                    (inp.find_element(By.XPATH, "./ancestor::*[1]").text or "")[:100]
-                )
+                body = d.find_element(By.TAG_NAME, "body").text or ""
+                if (
+                    "Filtro Data" in body
+                    or "Date Filter" in body
+                    or "Filtro data" in body
+                    or ("Início" in body and "Fim" in body)
+                    or ("Inicio" in body and "Fim" in body)
+                    or ("Start" in body and "End" in body)
+                ):
+                    return True
             except Exception:
                 pass
-            return " ".join(parts).lower()
-
-        ini_el = fim_el = None
-        for inp in inputs:
-            m = meta(inp)
-            if ini_el is None and any(
-                x in m for x in ("início", "inicio", "start", "from", "datainicio")
-            ):
-                ini_el = inp
-            elif fim_el is None and any(
-                x in m for x in ("fim", "end", "until", "datafim", "até", "ate")
-            ):
-                fim_el = inp
-
-        date_like = []
-        for inp in inputs:
-            try:
-                val = inp.get_attribute("value") or ""
-                if re.search(r"\d{2}/\d{2}/\d{4}", val) or "data" in meta(inp) or "date" in meta(inp):
-                    date_like.append(inp)
-            except Exception:
-                continue
-        if ini_el is None and date_like:
-            ini_el = date_like[0]
-        if fim_el is None and len(date_like) >= 2:
-            fim_el = date_like[1]
-
-        for el, val in ((ini_el, ini_val), (fim_el, fim_val)):
-            if el is None:
-                continue
-            try:
-                el.click()
-                el.send_keys(Keys.CONTROL, "a")
-                el.send_keys(Keys.BACKSPACE)
-                el.send_keys(val)
-                el.send_keys(Keys.TAB)
-                filled += 1
-            except Exception:
-                try:
-                    d.execute_script(
-                        "arguments[0].value=arguments[1];"
-                        "arguments[0].dispatchEvent(new Event('change',{bubbles:true}));",
-                        el,
-                        val,
-                    )
-                    filled += 1
-                except Exception:
-                    pass
-        return filled > 0
+            self._sleep(0.2)
+        return False
 
     def _click_popup_filtrar(self) -> bool:
-        """Clica Filtrar/Filter do popup Filtro Data (não o da barra principal)."""
+        """Clica Filtrar/Filter DENTRO do popup Filtro Data."""
         d = self._d()
-        for el in d.find_elements(
-            By.XPATH,
-            "//button[normalize-space()='Filtrar' or normalize-space()='Filter'] | "
-            "//a[normalize-space()='Filtrar' or normalize-space()='Filter'] | "
-            "//input[(@type='button' or @type='submit') and "
-            "(@value='Filtrar' or @value='Filter')]",
-        ):
-            try:
-                if not el.is_displayed():
-                    continue
-                # dentro de popup de data?
-                try:
-                    anc = el.find_element(
-                        By.XPATH,
-                        "./ancestor::*[contains(.,'Filtro Data') or contains(.,'Date Filter') "
-                        "or contains(.,'Início') or contains(.,'Inicio')][1]",
-                    )
-                    at = (anc.text or "")[:200]
-                    if "Filtro Data" in at or "Date Filter" in at or "Início" in at or "Inicio" in at:
-                        self._click(el)
-                        logger.info("Clicou Filtrar do popup de data")
-                        return True
-                except Exception:
-                    continue
-            except Exception:
-                continue
-        # último recurso: qualquer Filtrar pequeno perto de "Filtro Data"
         try:
             ok = d.execute_script(
                 """
-                var nodes = document.querySelectorAll('button,a,input[type=button]');
+                function norm(s){ return (s||'').replace(/\\s+/g,' ').trim(); }
+                var nodes = document.querySelectorAll('button,a,input[type=button],input[type=submit],span');
+                var best = null;
                 for (var i=0;i<nodes.length;i++){
-                  var t = (nodes[i].innerText||nodes[i].value||'').replace(/\\s+/g,' ').trim();
+                  var el = nodes[i];
+                  var t = norm(el.innerText || el.value || '');
                   if (t !== 'Filtrar' && t !== 'Filter') continue;
-                  var p = nodes[i], ctx='';
-                  for (var k=0;k<6 && p;k++){ ctx += ' '+(p.innerText||'').slice(0,100); p=p.parentElement; }
-                  if (/Filtro\\s*Data|Date\\s*Filter|In[ií]cio/i.test(ctx)){
-                    nodes[i].click(); return true;
+                  var r = el.getBoundingClientRect();
+                  if (r.width < 20 || r.height < 10) continue;
+                  // contexto: popup de data (não o Filter grande da barra)
+                  var p = el, ctx = '';
+                  for (var k=0;k<7 && p;k++){
+                    ctx += ' ' + norm(p.innerText||'').slice(0,150);
+                    p = p.parentElement;
+                  }
+                  if (!/Filtro\\s*Data|Date\\s*Filter|In[ií]cio|Start\\s*:/i.test(ctx)) continue;
+                  // botão pequeno do popup (barra tem botão maior com ícone)
+                  if (r.width > 220) continue;
+                  best = el;
+                  break;
+                }
+                if (!best){
+                  // 2º: qualquer Filtrar perto de Início/Fim
+                  for (var i=0;i<nodes.length;i++){
+                    var el = nodes[i];
+                    var t = norm(el.innerText || el.value || '');
+                    if (t !== 'Filtrar' && t !== 'Filter') continue;
+                    var p = el, ctx = '';
+                    for (var k=0;k<6 && p;k++){
+                      ctx += ' ' + norm(p.innerText||'').slice(0,120);
+                      p = p.parentElement;
+                    }
+                    if (/In[ií]cio|Filtro\\s*Data|Date\\s*Filter/i.test(ctx)){
+                      best = el; break;
+                    }
                   }
                 }
-                return false;
+                if (!best) return false;
+                best.click();
+                return true;
                 """
             )
-            return bool(ok)
+            if ok:
+                logger.info("Clicou Filtrar do popup de data")
+                return True
+        except Exception as e:
+            logger.warning("click popup filtrar: %s", e)
+        return False
+
+    def _click_written_date_inicio(self) -> bool:
+        """
+        Clica na data escrita do popup (Início: 11/07/2026 00:00:00) — roxo.
+        Isso abre o calendário de intervalo.
+        """
+        d = self._d()
+        try:
+            clicked = d.execute_script(
+                """
+                function norm(s){ return (s||'').replace(/\\s+/g,' ').trim(); }
+                // 1) procura linha Início / Start com data clicável
+                var nodes = document.querySelectorAll('span,a,div,td,label,p,b,strong,em,input');
+                var targets = [];
+                for (var i=0;i<nodes.length;i++){
+                  var el = nodes[i];
+                  var t = norm(el.innerText || el.value || el.textContent || '');
+                  if (!t || t.length > 80) continue;
+                  if (!/\\d{2}\\/\\d{2}\\/\\d{4}/.test(t)) continue;
+                  // linha Início ou só a data roxa
+                  var hasIni = /In[ií]cio|Start/i.test(t);
+                  var onlyDate = /^\\d{2}\\/\\d{2}\\/\\d{4}(\\s+\\d{2}:\\d{2}(:\\d{2})?)?$/.test(t);
+                  if (!hasIni && !onlyDate) continue;
+                  // evita chip da barra (Date: ... Until)
+                  if (/\\bDate\\s*:|\\bData\\s*:/i.test(t) && /Until|At[eé]/i.test(t)) continue;
+                  if (/Ve[ií]culo|Vehicle|Filtros|Filters/i.test(t)) continue;
+                  var r = el.getBoundingClientRect();
+                  if (r.width < 8 || r.height < 6) continue;
+                  if (r.top < 40 || r.top > 500) continue;
+                  var score = (hasIni ? 0 : 10) + t.length;
+                  targets.push({el:el, t:t, score:score, top:r.top});
+                }
+                // preferir Início: ... e o nó mais curto
+                targets.sort(function(a,b){ return a.score - b.score || a.top - b.top; });
+                if (!targets.length) return {ok:false};
+                // se há Início, clica no trecho da data (filho) se existir
+                var c = targets[0];
+                var clickEl = c.el;
+                // filhos com só a data
+                var kids = c.el.querySelectorAll('span,a,div,b,em,input');
+                for (var j=0;j<kids.length;j++){
+                  var kt = norm(kids[j].innerText || kids[j].value || '');
+                  if (/^\\d{2}\\/\\d{2}\\/\\d{4}/.test(kt) && kt.length < 30){
+                    clickEl = kids[j];
+                    break;
+                  }
+                }
+                try { clickEl.scrollIntoView({block:'center'}); } catch(e){}
+                clickEl.click();
+                return {ok:true, t: norm(clickEl.innerText||clickEl.value||c.t)};
+                """
+            )
+            if clicked and clicked.get("ok"):
+                logger.info("Clicou data escrita Início: %s", clicked.get("t"))
+                return True
+        except Exception as e:
+            logger.warning("click data escrita: %s", e)
+
+        # Selenium fallback
+        for xp in [
+            "//*[contains(.,'Início') or contains(.,'Inicio') or contains(.,'Start')]"
+            "//*[contains(text(),'/')]",
+            "//*[contains(text(),'Início') or contains(text(),'Inicio')]",
+            "//span[contains(text(),'/') and contains(text(),':')]",
+        ]:
+            for el in d.find_elements(By.XPATH, xp):
+                try:
+                    t = (el.text or "").strip()
+                    if not re.search(r"\d{2}/\d{2}/\d{4}", t):
+                        continue
+                    if len(t) > 80:
+                        continue
+                    if el.is_displayed():
+                        self._click(el)
+                        logger.info("Clicou data escrita (selenium): %s", t[:40])
+                        return True
+                except Exception:
+                    continue
+        return False
+
+    def _calendar_visible(self) -> bool:
+        d = self._d()
+        try:
+            return bool(
+                d.execute_script(
+                    """
+                    function norm(s){ return (s||'').toLowerCase(); }
+                    var months = 'janeiro fevereiro março abril maio junho julho agosto setembro outubro novembro dezembro january february march april may june july august september october november december';
+                    var nodes = document.querySelectorAll('div,table,section');
+                    for (var i=0;i<nodes.length;i++){
+                      var el = nodes[i];
+                      var r = el.getBoundingClientRect();
+                      if (r.width < 180 || r.height < 120 || r.top > 600) continue;
+                      var t = norm(el.innerText||'');
+                      if (t.length > 1200) continue;
+                      var hasMonth = false;
+                      months.split(' ').forEach(function(m){
+                        if (m && t.indexOf(m) >= 0) hasMonth = true;
+                      });
+                      var hasDays = /\\b(1[0-9]|2[0-9]|3[01]|[1-9])\\b/.test(t)
+                        && /seg|ter|qua|qui|sex|sáb|sab|dom|sun|mon|tue|wed|thu|fri|sat/i.test(t);
+                      if (hasMonth && hasDays) return true;
+                      // classes típicas de datepicker
+                      var cls = (el.className||'').toLowerCase();
+                      if (/daterangepicker|datepicker|calendar|air-datepicker|flatpickr|p-datepicker/i.test(cls)
+                          && r.width > 150) return true;
+                    }
+                    return false;
+                    """
+                )
+            )
         except Exception:
             return False
+
+    def _select_range_on_calendar(self, data_ini: date, data_fim: date) -> bool:
+        """
+        No calendário (2 meses): clica dia início e dia fim (range).
+        Equivale a arrastar da primeira data até a selecionada.
+        """
+        d = self._d()
+        ini_d, ini_m, ini_y = data_ini.day, data_ini.month, data_ini.year
+        fim_d, fim_m, fim_y = data_fim.day, data_fim.month, data_fim.year
+        mes_ini_pt = self._MES_PT[ini_m - 1]
+        mes_fim_pt = self._MES_PT[fim_m - 1]
+        mes_ini_en = self._MES_EN[ini_m - 1]
+        mes_fim_en = self._MES_EN[fim_m - 1]
+
+        # navega meses se preciso e clica os dias
+        try:
+            result = d.execute_script(
+                """
+                var iniDay = arguments[0], iniMonth = arguments[1], iniYear = arguments[2];
+                var fimDay = arguments[3], fimMonth = arguments[4], fimYear = arguments[5];
+                var mesIniPt = arguments[6], mesFimPt = arguments[7];
+                var mesIniEn = arguments[8], mesFimEn = arguments[9];
+                function norm(s){ return (s||'').replace(/\\s+/g,' ').trim().toLowerCase(); }
+                function visible(el){
+                  var r = el.getBoundingClientRect();
+                  return r.width > 0 && r.height > 0 && r.bottom > 0 && r.top < innerHeight + 50;
+                }
+                function findCalendarRoot(){
+                  var sels = [
+                    '.daterangepicker', '.datepicker', '.flatpickr-calendar',
+                    '.air-datepicker', '.p-datepicker', '[class*="datepicker"]',
+                    '[class*="daterange"]', '[class*="calendar"]'
+                  ];
+                  for (var s=0;s<sels.length;s++){
+                    var els = document.querySelectorAll(sels[s]);
+                    for (var i=0;i<els.length;i++){
+                      if (visible(els[i]) && els[i].getBoundingClientRect().width > 150)
+                        return els[i];
+                    }
+                  }
+                  // fallback: div com 2 meses
+                  var all = document.querySelectorAll('div');
+                  var best = null, bestW = 0;
+                  for (var i=0;i<all.length;i++){
+                    var el = all[i];
+                    if (!visible(el)) continue;
+                    var r = el.getBoundingClientRect();
+                    if (r.width < 280 || r.height < 150 || r.width > 900) continue;
+                    var t = norm(el.innerText);
+                    if (t.length > 900) continue;
+                    var months = 0;
+                    ['janeiro','fevereiro','março','abril','maio','junho','julho','agosto',
+                     'setembro','outubro','novembro','dezembro',
+                     'january','february','march','april','may','june','july','august',
+                     'september','october','november','december'].forEach(function(m){
+                      if (t.indexOf(m) >= 0) months++;
+                    });
+                    if (months >= 1 && /\\b1[0-9]|2[0-9]|3[01]|[1-9]\\b/.test(t)){
+                      if (r.width > bestW){ bestW = r.width; best = el; }
+                    }
+                  }
+                  return best;
+                }
+                function monthNameToNum(name){
+                  var pt = ['janeiro','fevereiro','março','abril','maio','junho','julho','agosto','setembro','outubro','novembro','dezembro'];
+                  var en = ['january','february','march','april','may','june','july','august','september','october','november','december'];
+                  name = norm(name);
+                  for (var i=0;i<12;i++){
+                    if (name.indexOf(pt[i]) >= 0 || name.indexOf(en[i]) >= 0) return i+1;
+                  }
+                  return 0;
+                }
+                function clickNav(root, dir){
+                  // dir: -1 prev, +1 next
+                  var arrows = root.querySelectorAll(
+                    'th.prev, th.next, .prev, .next, button, a, span, i, svg'
+                  );
+                  for (var i=0;i<arrows.length;i++){
+                    var el = arrows[i];
+                    if (!visible(el)) continue;
+                    var cls = ((el.className&&el.className.toString)||'') + ' ' + (el.getAttribute('class')||'');
+                    var aria = (el.getAttribute('aria-label')||'') + ' ' + (el.getAttribute('title')||'');
+                    var t = norm(el.innerText||'');
+                    var isPrev = /prev|anterior|left|←|</i.test(cls+' '+aria+' '+t);
+                    var isNext = /next|próximo|proximo|right|→|>/i.test(cls+' '+aria+' '+t);
+                    if (dir < 0 && isPrev){ el.click(); return true; }
+                    if (dir > 0 && isNext){ el.click(); return true; }
+                  }
+                  // setas no canto (← →) sem classe
+                  var tops = root.querySelectorAll('button,a,span,th');
+                  for (var i=0;i<tops.length;i++){
+                    var el = tops[i];
+                    var t = (el.innerText||'').trim();
+                    if (dir < 0 && (t === '←' || t === '<' || t === '‹')){ el.click(); return true; }
+                    if (dir > 0 && (t === '→' || t === '>' || t === '›')){ el.click(); return true; }
+                  }
+                  return false;
+                }
+                function panelMonths(root){
+                  var text = norm(root.innerText).slice(0, 400);
+                  var found = [];
+                  var re = /(janeiro|fevereiro|março|abril|maio|junho|julho|agosto|setembro|outubro|novembro|dezembro|january|february|march|april|may|june|july|august|september|october|november|december)\\s*(\\d{4})?/gi;
+                  var m;
+                  while ((m = re.exec(text)) && found.length < 4){
+                    found.push({month: monthNameToNum(m[1]), year: m[2] ? parseInt(m[2],10) : 0});
+                  }
+                  return found;
+                }
+                function ensureMonthVisible(root, month, year){
+                  for (var attempt=0; attempt<14; attempt++){
+                    var panels = panelMonths(root);
+                    for (var i=0;i<panels.length;i++){
+                      var p = panels[i];
+                      if (p.month === month && (!p.year || p.year === year || year === 0))
+                        return true;
+                    }
+                    // decide direção
+                    var first = panels[0];
+                    var goNext = true;
+                    if (first && first.month){
+                      var cur = first.year * 12 + first.month;
+                      var want = year * 12 + month;
+                      goNext = want > cur;
+                    }
+                    if (!clickNav(root, goNext ? 1 : -1)) return false;
+                  }
+                  return false;
+                }
+                function isOffDay(td){
+                  var cls = ((td.className&&td.className.toString)||'').toLowerCase();
+                  if (/off|disabled|old|new|muted|outside|prev-month|next-month|other/i.test(cls))
+                    return true;
+                  var aria = (td.getAttribute('aria-disabled')||'');
+                  if (aria === 'true') return true;
+                  var st = (td.getAttribute('style')||'');
+                  if (/opacity:\\s*0\\.[0-4]/i.test(st)) return true;
+                  // texto cinza: cor fraca — difícil; usa class
+                  return false;
+                }
+                function clickDay(root, day, month, year){
+                  ensureMonthVisible(root, month, year);
+                  // células td/span com o número do dia
+                  var cells = root.querySelectorAll(
+                    'td, span, div, button, a'
+                  );
+                  var matches = [];
+                  for (var i=0;i<cells.length;i++){
+                    var el = cells[i];
+                    if (!visible(el)) continue;
+                    if (isOffDay(el)) continue;
+                    var t = (el.innerText||el.textContent||'').replace(/\\s+/g,'').trim();
+                    if (t !== String(day)) continue;
+                    // evita cabeçalho de dia da semana
+                    if (el.tagName === 'TH') continue;
+                    var r = el.getBoundingClientRect();
+                    if (r.width < 12 || r.height < 12 || r.width > 80) continue;
+                    // tem que estar em painel do mês certo se possível
+                    var par = el, ctx = '';
+                    for (var k=0;k<6 && par;k++){
+                      ctx += ' ' + norm(par.innerText||'').slice(0,80);
+                      par = par.parentElement;
+                    }
+                    var monOk = true;
+                    var mnamePt = ['','janeiro','fevereiro','março','abril','maio','junho','julho','agosto','setembro','outubro','novembro','dezembro'][month];
+                    var mnameEn = ['','january','february','march','april','may','june','july','august','september','october','november','december'][month];
+                    // se o contexto do painel cita outro mês e não o nosso, pular
+                    // (cells em painel correto preferidos)
+                    var score = r.top + r.left * 0.001;
+                    if (ctx.indexOf(mnamePt) >= 0 || ctx.indexOf(mnameEn) >= 0) score -= 1000;
+                    matches.push({el:el, score:score});
+                  }
+                  matches.sort(function(a,b){ return a.score - b.score; });
+                  if (!matches.length) return false;
+                  matches[0].el.click();
+                  return true;
+                }
+
+                var root = findCalendarRoot();
+                if (!root) return {ok:false, reason:'sem_calendario'};
+
+                var ok1 = clickDay(root, iniDay, iniMonth, iniYear);
+                if (!ok1) return {ok:false, reason:'sem_dia_ini', day:iniDay};
+
+                // pequeno delay via reflow
+                var ok2 = true;
+                if (fimDay !== iniDay || fimMonth !== iniMonth || fimYear !== iniYear){
+                  ok2 = clickDay(root, fimDay, fimMonth, fimYear);
+                } else {
+                  // mesmo dia: clica de novo no mesmo (range 1 dia)
+                  ok2 = clickDay(root, fimDay, fimMonth, fimYear);
+                }
+                return {ok: !!(ok1 && ok2), ok1:ok1, ok2:ok2};
+                """,
+                ini_d,
+                ini_m,
+                ini_y,
+                fim_d,
+                fim_m,
+                fim_y,
+                mes_ini_pt,
+                mes_fim_pt,
+                mes_ini_en,
+                mes_fim_en,
+            )
+            logger.info("Calendário range: %s", result)
+            if result and result.get("ok"):
+                return True
+        except Exception as e:
+            logger.warning("select range calendar JS: %s", e)
+
+        # Fallback Selenium: clica números do dia
+        try:
+            return self._select_range_selenium_days(data_ini, data_fim)
+        except Exception as e:
+            logger.warning("select range selenium: %s", e)
+            return False
+
+    def _select_range_selenium_days(self, data_ini: date, data_fim: date) -> bool:
+        """Clica dias no calendário via Selenium + arrasta se possível."""
+        d = self._d()
+
+        def find_day_el(day: int, month: int):
+            mes_pt = self._MES_PT[month - 1]
+            mes_en = self._MES_EN[month - 1]
+            candidates = []
+            for el in d.find_elements(
+                By.XPATH,
+                f"//td[normalize-space()='{day}'] | //span[normalize-space()='{day}'] | "
+                f"//div[normalize-space()='{day}'] | //button[normalize-space()='{day}']",
+            ):
+                try:
+                    if not el.is_displayed():
+                        continue
+                    cls = (el.get_attribute("class") or "").lower()
+                    if any(
+                        x in cls
+                        for x in (
+                            "off",
+                            "disabled",
+                            "old",
+                            "new",
+                            "muted",
+                            "outside",
+                        )
+                    ):
+                        continue
+                    # contexto do mês
+                    try:
+                        ctx = (
+                            el.find_element(
+                                By.XPATH, "./ancestor::div[1]"
+                            ).text
+                            or ""
+                        ).lower()
+                    except Exception:
+                        ctx = ""
+                    score = 0
+                    if mes_pt in ctx or mes_en in ctx:
+                        score -= 10
+                    candidates.append((score, el))
+                except Exception:
+                    continue
+            candidates.sort(key=lambda x: x[0])
+            return candidates[0][1] if candidates else None
+
+        el_ini = find_day_el(data_ini.day, data_ini.month)
+        if not el_ini:
+            return False
+        el_fim = find_day_el(data_fim.day, data_fim.month) or el_ini
+
+        try:
+            # tenta arrastar (mousedown → move → mouseup)
+            ActionChains(d).click_and_hold(el_ini).pause(0.15).move_to_element(
+                el_fim
+            ).pause(0.1).release().perform()
+            logger.info(
+                "Arrastou calendário %s → %s",
+                data_ini,
+                data_fim,
+            )
+            return True
+        except Exception:
+            try:
+                self._click(el_ini)
+                self._sleep(0.25)
+                if el_fim is not el_ini:
+                    self._click(el_fim)
+                return True
+            except Exception:
+                return False
 
     def set_date_filter(
         self,
@@ -2220,8 +2345,11 @@ class SitraxBot:
         data_fim: Optional[date] = None,
     ) -> None:
         """
-        Clica no chip Data/Date → preenche Início e Fim no popup → Filtrar.
-        Confere o chip depois (não o body da página).
+        Fluxo Sitrax (tela real):
+          1) Clica chip Data/Date
+          2) Clica a data escrita (Início: 11/07/…) → abre calendário
+          3) Clica/arrasta do dia início ao dia fim no calendário
+          4) Clica Filtrar do popup para aplicar
         """
         d = self._d()
         data_ini = data_ini or date.today()
@@ -2234,60 +2362,85 @@ class SitraxBot:
         self._close_date_popup_if_open()
 
         if self._date_chip_matches(data_ini, data_fim):
-            logger.info(
-                "Data já no chip: %s → %s (sem clicar)", ini_br, fim_br
-            )
-            self._trace(
-                "data_ja_ok",
-                f"Chip já em {ini_br} → {fim_br}",
-                shot=False,
-            )
+            logger.info("Data já no chip: %s → %s", ini_br, fim_br)
+            self._trace("data_ja_ok", f"{ini_br} → {fim_br}", shot=False)
             return
 
         for attempt in range(1, 4):
             self._close_date_popup_if_open()
-            self._sleep(0.3)
+            self._sleep(0.25)
 
+            # 1) chip Data
             if not self._click_date_chip():
-                logger.warning(
-                    "Não achou chip Data/Date (tentativa %s)", attempt
-                )
+                logger.warning("Chip Data/Date sumiu (tentativa %s)", attempt)
                 self._save_debug(f"data_chip_sumiu_{attempt}")
-                continue
-
-            self._sleep(0.8)
-            # espera popup aparecer
-            for _ in range(8):
+                # tenta de novo com scroll no topo
                 try:
-                    body = d.find_element(By.TAG_NAME, "body").text or ""
-                    if (
-                        "Filtro Data" in body
-                        or "Date Filter" in body
-                        or "Filtro data" in body
-                        or ("Início" in body and "Fim" in body)
-                        or ("Start" in body and "End" in body)
-                    ):
-                        break
+                    d.execute_script("window.scrollTo(0,0);")
                 except Exception:
                     pass
-                self._sleep(0.25)
+                self._sleep(0.3)
+                if not self._click_date_chip():
+                    continue
 
-            self._save_debug(f"data_popup_aberto_{attempt}")
-            ok_fill = self._fill_date_popup(ini_br, fim_br)
-            logger.info(
-                "Fill popup data tentativa %s: ok=%s (%s → %s)",
-                attempt,
-                ok_fill,
-                ini_br,
-                fim_br,
-            )
-            # se fill não clicou Filtrar, tenta de novo
-            if ok_fill:
-                self._click_popup_filtrar()
+            self._sleep(0.7)
+            if not self._wait_filtro_data_popup(4.0):
+                logger.warning("Popup Filtro Data não abriu (tentativa %s)", attempt)
+            self._save_debug(f"data_apos_chip_{attempt}")
+
+            # 2) Clica a data escrita do Início (ex.: 11/07/2026 00:00:00) → calendário
+            #    (NÃO clicar Filtrar antes — fecha o popup sem mudar a data)
+            if not self._click_written_date_inicio():
+                logger.warning(
+                    "Não achou data escrita Início (tentativa %s)", attempt
+                )
+                try:
+                    d.execute_script(
+                        """
+                        var nodes = document.querySelectorAll('span,a,div,input,b,em');
+                        for (var i=0;i<nodes.length;i++){
+                          var t = (nodes[i].innerText||nodes[i].value||'').replace(/\\s+/g,' ').trim();
+                          if (/^\\d{2}\\/\\d{2}\\/\\d{4}/.test(t) && t.length < 28){
+                            var r = nodes[i].getBoundingClientRect();
+                            if (r.top > 60 && r.top < 450 && r.width > 20){
+                              nodes[i].click(); return t;
+                            }
+                          }
+                        }
+                        return null;
+                        """
+                    )
+                except Exception:
+                    pass
+            self._sleep(0.65)
+
+            # espera calendário (julho/agosto com dias)
+            for _ in range(14):
+                if self._calendar_visible():
+                    break
+                # se ainda não abriu, clica de novo na data escrita
+                if _ == 5:
+                    self._click_written_date_inicio()
+                self._sleep(0.25)
+            self._save_debug(f"data_calendario_{attempt}")
+
+            # 3) no calendário: clica dia início e arrasta/clica até o fim
+            if self._calendar_visible():
+                ok_cal = self._select_range_on_calendar(data_ini, data_fim)
+                logger.info(
+                    "Calendário select %s→%s: %s", ini_br, fim_br, ok_cal
+                )
+                self._sleep(0.45)
+                self._save_debug(f"data_apos_calendario_{attempt}")
+            else:
+                logger.warning("Calendário não abriu (tentativa %s)", attempt)
+
+            # 4) Filtrar do popup (aplica o período escolhido)
+            self._click_popup_filtrar()
             self._wait_loader_gone(25)
             self._sleep(0.5)
             self._close_date_popup_if_open()
-            self._sleep(0.4)
+            self._sleep(0.35)
 
             chip_now = self._read_date_chip_text()
             self._trace(
@@ -2295,18 +2448,11 @@ class SitraxBot:
                 f"pedido {ini_br}→{fim_br} | chip={chip_now!r}",
                 shot=True,
             )
-
             if self._date_chip_matches(data_ini, data_fim):
-                logger.info(
-                    "Data filtro OK (tentativa %s): %s → %s",
-                    attempt,
-                    ini_br,
-                    fim_br,
-                )
+                logger.info("Data filtro OK: %s → %s", ini_br, fim_br)
                 return
-
             logger.warning(
-                "Data chip ainda errado (tentativa %s): chip=%r queria %s→%s",
+                "Data ainda errada (tentativa %s): chip=%r queria %s→%s",
                 attempt,
                 chip_now,
                 ini_br,
