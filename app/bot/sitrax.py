@@ -1910,67 +1910,319 @@ class SitraxBot:
             logger.warning("locate bar date: %s", e)
             return None
 
-    def _click_date_chip(self) -> bool:
+    def _discover_date_filter_hooks(self) -> dict:
+        """Descobre funções/onclick/ids JSF do filtro de data (como hideModalSearchVeiculo)."""
+        d = self._d()
+        try:
+            return d.execute_script(
+                """
+                var out = {fns: [], onclicks: [], ids: [], classes: []};
+                // funções globais
+                for (var k in window) {
+                  try {
+                    if (typeof window[k] !== 'function') continue;
+                    if (/filtro.*data|data.*filtro|date.*filter|filter.*date|showDate|openDate|FiltroData|filtroData|DateFilter/i.test(k)
+                        && !/veiculo|vehicle|placa/i.test(k)) {
+                      out.fns.push(k);
+                    }
+                  } catch(e) {}
+                }
+                // onclick / id / class no DOM
+                var all = document.querySelectorAll('[onclick],[id],[class]');
+                for (var i=0;i<all.length && out.onclicks.length < 30;i++){
+                  var el = all[i];
+                  var oc = el.getAttribute('onclick') || '';
+                  var id = el.id || '';
+                  var cls = (el.className && el.className.toString) ? el.className.toString() : (el.className||'');
+                  if (oc && /filtro|FiltroData|dateFilter|DateFilter|dataInicio|dataFim|showDate|openDate/i.test(oc)
+                      && !/veiculo|vehicle|placa|SearchVeiculo/i.test(oc)) {
+                    out.onclicks.push(oc.slice(0,120));
+                  }
+                  if (id && /FiltroData|filtroData|DateFilter|filtro.?data|dataFilter/i.test(id)
+                      && !/veiculo|vehicle/i.test(id)) {
+                    out.ids.push(id.slice(0,80));
+                  }
+                  if (cls && /filtro-data|date-filter|datepicker|daterange/i.test(cls)) {
+                    out.classes.push(cls.slice(0,80));
+                  }
+                }
+                // texto Date/Until com ancestral onclick
+                var nodes = document.querySelectorAll('span,div,a,td,li,button');
+                for (var i=0;i<nodes.length;i++){
+                  var t = (nodes[i].innerText||'').replace(/\\s+/g,' ').trim();
+                  if (t.length > 100 || t.length < 8) continue;
+                  if (!/\\d{2}\\/\\d{2}\\/\\d{4}/.test(t)) continue;
+                  if (!(/Until|At[eé]|Date\\s*:|Data\\s*:/i.test(t))) continue;
+                  if (/Vehicle|Ve[ií]culo/i.test(t)) continue;
+                  var p = nodes[i];
+                  for (var up=0; up<8 && p; up++){
+                    var o = p.getAttribute && p.getAttribute('onclick');
+                    if (o && out.onclicks.indexOf(o.slice(0,120)) < 0)
+                      out.onclicks.push('ANCESTOR:' + o.slice(0,120));
+                    p = p.parentElement;
+                  }
+                }
+                return out;
+                """
+            ) or {}
+        except Exception as e:
+            logger.warning("discover date hooks: %s", e)
+            return {}
+
+    def _try_open_date_via_jsf(self) -> bool:
         """
-        PRIMEIRO clique = na DATA ESCRITA (11/07/2026 …) na barra.
-        Usa clique real CDP nas coordenadas da 1ª data.
+        Abre filtro de data via API JSF/PrimeFaces da página
+        (mesmo estilo de hideModalSearchVeiculo / selectVeiculoSearch).
         """
         d = self._d()
-        loc = self._locate_bar_written_date()
-        if not loc:
-            logger.warning("Não localizou data escrita na barra")
-            return False
-
-        cx, cy = loc.get("clickX"), loc.get("clickY")
-        logger.info(
-            "Data escrita na barra: %r @ (%.0f,%.0f) purple=%s",
-            loc.get("t"),
-            cx or 0,
-            cy or 0,
-            loc.get("purple"),
-        )
-
-        # 1) CDP no ponto da 1ª data escrita
-        if cx and cy and self._cdp_click_xy(cx, cy):
-            self._sleep(0.35)
-            if self._popup_filtro_data_open():
-                return True
-
-        # 2) elementFromPoint + click
+        hooks = self._discover_date_filter_hooks()
+        logger.info("Hooks filtro data: %s", hooks)
         try:
-            d.execute_script(
-                self._js_is_purple()
-                + """
-                var x = arguments[0], y = arguments[1];
-                var el = document.elementFromPoint(x, y);
-                if (!el) return false;
-                forceClick(el);
-                // sobe até achar algo com data
-                var p = el;
-                for (var i=0;i<5 && p;i++){
-                  if (/\\d{2}\\/\\d{2}\\/\\d{4}/.test(norm(p.innerText||''))){
-                    forceClick(p); break;
-                  }
-                  p = p.parentElement;
-                }
-                return true;
-                """,
-                cx,
-                cy,
+            self._trace(
+                "data_hooks",
+                f"fns={hooks.get('fns')} ids={hooks.get('ids')} oc={hooks.get('onclicks')}",
+                shot=False,
             )
-            self._sleep(0.35)
+        except Exception:
+            pass
+
+        # 1) chamar funções candidatas
+        fns = list(hooks.get("fns") or [])
+        # nomes comuns em apps Sitrax/JSF
+        for name in [
+            "showFiltroData",
+            "openFiltroData",
+            "exibirFiltroData",
+            "abrirFiltroData",
+            "showDateFilter",
+            "openDateFilter",
+            "showFilterDate",
+            "filtroData",
+            "FiltroData",
+            "showModalFiltroData",
+            "openModalFiltroData",
+        ]:
+            if name not in fns:
+                fns.append(name)
+
+        for name in fns:
+            try:
+                called = d.execute_script(
+                    """
+                    var n = arguments[0];
+                    try {
+                      if (typeof window[n] === 'function') {
+                        window[n]();
+                        return 'called:' + n;
+                      }
+                    } catch(e) { return 'err:' + e; }
+                    return null;
+                    """,
+                    name,
+                )
+                if called:
+                    logger.info("JSF date fn: %s", called)
+                    self._sleep(0.5)
+                    if self._popup_filtro_data_open():
+                        return True
+            except Exception:
+                continue
+
+        # 2) executar onclick de elementos relacionados
+        try:
+            clicked = d.execute_script(
+                """
+                function norm(s){ return (s||'').replace(/\\s+/g,' ').trim(); }
+                var hits = [];
+                // a) elementos com onclick de data
+                var all = document.querySelectorAll('[onclick]');
+                for (var i=0;i<all.length;i++){
+                  var oc = all[i].getAttribute('onclick') || '';
+                  if (!oc) continue;
+                  if (/veiculo|vehicle|placa|SearchVeiculo|cadVeiculo/i.test(oc)) continue;
+                  if (/filtroData|FiltroData|dateFilter|DateFilter|filtro.*data|data.*filter|showDate|openDate|dataInicio|DataInicio/i.test(oc)) {
+                    hits.push(all[i]);
+                  }
+                }
+                // b) id contém FiltroData
+                var byId = document.querySelectorAll('[id*="FiltroData"],[id*="filtroData"],[id*="DateFilter"],[id*="filtro_data"]');
+                for (var i=0;i<byId.length;i++){
+                  if (hits.indexOf(byId[i]) < 0) hits.push(byId[i]);
+                }
+                // c) ancestral clicável da data escrita Until/Até
+                var nodes = document.querySelectorAll('span,div,a,td,li,button,label');
+                for (var i=0;i<nodes.length;i++){
+                  var t = norm(nodes[i].innerText);
+                  if (t.length < 8 || t.length > 120) continue;
+                  if (!/\\d{2}\\/\\d{2}\\/\\d{4}/.test(t)) continue;
+                  if (!(/Until|At[eé]|Date\\s*:|Data\\s*:/i.test(t))) continue;
+                  if (/Vehicle|Ve[ií]culo/i.test(t)) continue;
+                  var p = nodes[i];
+                  for (var up=0; up<10 && p; up++){
+                    var oc = p.getAttribute && p.getAttribute('onclick');
+                    var role = p.getAttribute && p.getAttribute('role');
+                    var st = window.getComputedStyle(p);
+                    var clickable = !!(oc || role==='button' || p.tagName==='A' || p.tagName==='BUTTON'
+                      || st.cursor==='pointer' || /clickable|chip|filter|badge/i.test(p.className||''));
+                    if (clickable && hits.indexOf(p) < 0) hits.push(p);
+                    p = p.parentElement;
+                  }
+                }
+                var results = [];
+                for (var i=0;i<hits.length && i<12;i++){
+                  var el = hits[i];
+                  try {
+                    el.scrollIntoView({block:'center'});
+                    // tenta onclick string
+                    var oc = el.getAttribute('onclick');
+                    if (oc) {
+                      try { eval(oc); results.push('eval:'+oc.slice(0,60)); } catch(e1) {
+                        try { el.onclick(); results.push('onclick()'); } catch(e2) {}
+                      }
+                    }
+                    el.click();
+                    results.push('click:'+ (el.id||el.tagName||'?') + ':' + norm(el.innerText).slice(0,40));
+                  } catch(e) { results.push('err:'+e); }
+                }
+                return {n: hits.length, results: results};
+                """
+            )
+            logger.info("JSF/DOM open date: %s", clicked)
+            self._sleep(0.6)
             if self._popup_filtro_data_open():
                 return True
         except Exception as e:
-            logger.warning("elementFromPoint click: %s", e)
+            logger.warning("try open jsf date: %s", e)
 
-        # 3) duplo clique CDP
-        if cx and cy and self._cdp_click_xy(cx, cy, double=True):
+        # 3) PrimeFaces widgets
+        try:
+            pf = d.execute_script(
+                """
+                if (typeof PrimeFaces === 'undefined' || !PrimeFaces.widgets) return null;
+                var names = Object.keys(PrimeFaces.widgets);
+                var hit = [];
+                for (var i=0;i<names.length;i++){
+                  if (/data|date|filtro/i.test(names[i]) && !/veiculo|vehicle/i.test(names[i])) {
+                    hit.push(names[i]);
+                    try {
+                      var w = PrimeFaces.widgets[names[i]];
+                      if (w && typeof w.show === 'function') w.show();
+                      else if (w && typeof w.enable === 'function') {}
+                    } catch(e) {}
+                  }
+                }
+                return hit;
+                """
+            )
+            if pf:
+                logger.info("PrimeFaces widgets date: %s", pf)
+                self._sleep(0.5)
+                if self._popup_filtro_data_open():
+                    return True
+        except Exception:
+            pass
+
+        # 4) Força exibir painéis FiltroData escondidos (JSF costuma usar display:none)
+        try:
+            forced = d.execute_script(
+                """
+                var sels = [
+                  '[id*="FiltroData"]', '[id*="filtroData"]', '[id*="DateFilter"]',
+                  '[id*="filtro_data"]', '[id*="panelFiltroData"]', '[id*="dlgFiltroData"]',
+                  '[class*="filtro-data"]', '[class*="date-filter"]'
+                ];
+                var n = 0;
+                sels.forEach(function(sel){
+                  document.querySelectorAll(sel).forEach(function(el){
+                    el.style.display = 'block';
+                    el.style.visibility = 'visible';
+                    el.style.opacity = '1';
+                    el.removeAttribute('hidden');
+                    if (el.classList) {
+                      el.classList.remove('ui-helper-hidden', 'hidden', 'd-none', 'ng-hide');
+                    }
+                    n++;
+                  });
+                });
+                return n;
+                """
+            )
+            logger.info("Painéis FiltroData forçados visíveis: %s", forced)
             self._sleep(0.4)
             if self._popup_filtro_data_open():
                 return True
+        except Exception:
+            pass
 
-        # 4) ActionChains no elemento Until/Date
+        return False
+
+    def _click_date_chip(self) -> bool:
+        """
+        Abre o popup Filtro Data:
+          A) funções/onclick JSF (preferencial no Sitrax)
+          B) clique na DATA ESCRITA (11/07…) via CDP / DOM
+        """
+        d = self._d()
+
+        # A) API da página (mais confiável que coordenadas em headless)
+        if self._try_open_date_via_jsf():
+            logger.info("Filtro Data aberto via JSF/DOM hooks")
+            return True
+
+        loc = self._locate_bar_written_date()
+        if not loc:
+            logger.warning("Não localizou data escrita na barra")
+            # ainda tenta XPath cru
+        else:
+            cx, cy = loc.get("clickX"), loc.get("clickY")
+            logger.info(
+                "Data escrita na barra: %r @ (%.0f,%.0f) purple=%s",
+                loc.get("t"),
+                cx or 0,
+                cy or 0,
+                loc.get("purple"),
+            )
+
+            # B1) CDP no ponto da 1ª data escrita
+            if cx and cy and self._cdp_click_xy(cx, cy):
+                self._sleep(0.4)
+                if self._popup_filtro_data_open():
+                    return True
+
+            # B2) clicar cadeia de ancestrais do elementFromPoint
+            try:
+                d.execute_script(
+                    self._js_is_purple()
+                    + """
+                    var x = arguments[0], y = arguments[1];
+                    var el = document.elementFromPoint(x, y);
+                    var chain = [];
+                    var p = el;
+                    for (var i=0;i<12 && p;i++){
+                      chain.push(p);
+                      p = p.parentElement;
+                    }
+                    for (var i=0;i<chain.length;i++){
+                      try { forceClick(chain[i]); } catch(e){}
+                    }
+                    return chain.length;
+                    """,
+                    cx,
+                    cy,
+                )
+                self._sleep(0.45)
+                if self._popup_filtro_data_open():
+                    return True
+            except Exception as e:
+                logger.warning("ancestor chain click: %s", e)
+
+            # B3) duplo clique CDP
+            if cx and cy and self._cdp_click_xy(cx, cy, double=True):
+                self._sleep(0.4)
+                if self._popup_filtro_data_open():
+                    return True
+
+        # B4) ActionChains — vários offsets na data escrita
         for xp in [
             "//*[contains(.,'Until') and contains(.,'/')]",
             "//*[contains(.,'Até') and contains(.,'/')]",
@@ -1986,26 +2238,38 @@ class SitraxBot:
                         continue
                     if not el.is_displayed():
                         continue
-                    # clica no terço esquerdo (1ª data)
                     rect = el.rect
-                    ox = max(8, int(rect.get("width", 40) * 0.15))
-                    oy = int(rect.get("height", 10) / 2)
-                    ActionChains(d).move_to_element_with_offset(
-                        el, ox, oy
-                    ).pause(0.1).click().perform()
-                    self._sleep(0.4)
-                    if self._popup_filtro_data_open():
-                        logger.info("Clicou data escrita (ActionChains): %s", t[:70])
-                        return True
+                    w = int(rect.get("width", 80) or 80)
+                    h = int(rect.get("height", 20) or 20)
+                    for frac in (0.12, 0.22, 0.35, 0.5):
+                        ox = max(4, min(w - 4, int(w * frac)))
+                        oy = max(2, h // 2)
+                        try:
+                            ActionChains(d).move_to_element_with_offset(
+                                el, ox, oy
+                            ).pause(0.08).click().perform()
+                        except Exception:
+                            try:
+                                ActionChains(d).move_to_element(el).click().perform()
+                            except Exception:
+                                self._click(el)
+                        self._sleep(0.35)
+                        if self._popup_filtro_data_open():
+                            logger.info(
+                                "Clicou data escrita (ActionChains frac=%.2f): %s",
+                                frac,
+                                t[:70],
+                            )
+                            return True
                 except Exception:
                     continue
 
-        # 5) forceClick JS no melhor nó (mesmo sem confirmar popup)
+        # B5) forceClick no nó + pais com cursor pointer
         try:
             ok = d.execute_script(
                 self._js_is_purple()
                 + """
-                var nodes = document.querySelectorAll('span,div,a,b,em,font');
+                var nodes = document.querySelectorAll('span,div,a,b,em,font,button,li');
                 var best = null, bestScore = 1e9;
                 for (var i=0;i<nodes.length;i++){
                   var el = nodes[i], t = norm(el.innerText||'');
@@ -2018,10 +2282,17 @@ class SitraxBot:
                   if (sc < bestScore){ bestScore = sc; best = el; }
                 }
                 if (!best) return false;
-                forceClick(best);
+                var p = best;
+                for (var i=0;i<10 && p;i++){
+                  forceClick(p);
+                  p = p.parentElement;
+                }
                 return true;
                 """
             )
+            self._sleep(0.4)
+            if self._popup_filtro_data_open():
+                return True
             return bool(ok)
         except Exception:
             return False
@@ -2034,26 +2305,32 @@ class SitraxBot:
                 d.execute_script(
                     """
                     function norm(s){ return (s||'').replace(/\\s+/g,' ').trim(); }
-                    var nodes = document.querySelectorAll('div,section,form,aside,span,ul');
+                    // 1) painel com id FiltroData visível
+                    var byId = document.querySelectorAll(
+                      '[id*="FiltroData"],[id*="filtroData"],[id*="DateFilter"],[id*="dlgFiltro"]'
+                    );
+                    for (var i=0;i<byId.length;i++){
+                      var r = byId[i].getBoundingClientRect();
+                      if (r.width > 80 && r.height > 40 && r.top >= 0 && r.top < 600)
+                        return true;
+                    }
+                    // 2) popover com Início+Fim / Start+End
+                    var nodes = document.querySelectorAll('div,section,form,aside,ul,table');
                     for (var i=0;i<nodes.length;i++){
                       var el = nodes[i];
                       var r = el.getBoundingClientRect();
-                      if (r.width < 100 || r.height < 50 || r.width > 700) continue;
-                      if (r.top < 40 || r.top > 500) continue;
+                      if (r.width < 80 || r.height < 40 || r.width > 800) continue;
+                      if (r.top < 30 || r.top > 560) continue;
                       var t = norm(el.innerText||'');
-                      if (t.length < 15 || t.length > 500) continue;
+                      if (t.length < 10 || t.length > 600) continue;
                       var title = /Filtro\\s*Data|Date\\s*Filter|Filter\\s*Date|Filtro\\s*data/i.test(t);
-                      var ini = /In[ií]cio\\s*:|Start\\s*:/i.test(t);
-                      var fim = /\\bFim\\s*:|\\bEnd\\s*:/i.test(t);
-                      var btn = /\\bFiltrar\\b|\\bFilter\\b|\\bFechar\\b|\\bClose\\b/i.test(t);
-                      if ((title || (ini && fim)) && btn) return true;
-                      if (title && ini) return true;
+                      var ini = /In[ií]cio\\s*:|Start\\s*:|From\\s*:/i.test(t);
+                      var fim = /\\bFim\\s*:|\\bEnd\\s*:|Until\\s*:/i.test(t);
+                      var btn = /\\bFiltrar\\b|\\bFilter\\b|\\bFechar\\b|\\bClose\\b|\\bApply\\b|\\bAplicar\\b/i.test(t);
+                      if (title && (ini || btn)) return true;
+                      if (ini && fim && btn) return true;
+                      if (ini && fim && t.length < 220) return true;
                     }
-                    // texto no body (menos confiável)
-                    var body = norm(document.body && document.body.innerText);
-                    if (/Filtro\\s*Data|Date\\s*Filter/i.test(body)
-                        && /In[ií]cio|Start\\s*:/i.test(body)
-                        && /Fechar|Close|Filtrar/i.test(body)) return true;
                     return false;
                     """
                 )
