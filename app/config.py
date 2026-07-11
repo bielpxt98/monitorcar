@@ -49,6 +49,11 @@ class Settings:
     session_secret: str = os.getenv(
         "SESSION_SECRET", "monitorcar-resumo-rota-session-v1"
     )
+    # Debug leve = sem fotos em massa, menos RAM (recomendado em produção)
+    # DEBUG_LIGHT=0 no Railway só se for calibrar com prints
+    debug_light: bool = _bool(os.getenv("DEBUG_LIGHT"), True)
+    debug_max_steps: int = int(os.getenv("DEBUG_MAX_STEPS", "40"))
+    debug_max_photos: int = int(os.getenv("DEBUG_MAX_PHOTOS", "6"))
 
 
 settings = Settings()
