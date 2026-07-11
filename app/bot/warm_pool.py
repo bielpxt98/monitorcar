@@ -269,45 +269,61 @@ class WarmPool:
                 _elapsed(),
             )
 
-            # lista veículos em background — não trava o “PRONTO”
+            # lista veículos em background — NÃO trava o status PRONTO,
+            # mas segura slot.lock para não brigar com pesquisa/login
             def _load_plates() -> None:
                 try:
-                    if not slot.alive() or slot.bot is not bot:
-                        return
-                    slot.message = (
-                        f"Chrome {slot.slot_id + 1}: listando placas…"
-                    )
-                    bot.open_vehicle_selector()
-                    bot.load_vehicle_list()
-                    n = bot._count_vehicle_items()
-                    try:
-                        plates = bot.list_vehicles() if hasattr(bot, "list_vehicles") else []
-                        if plates:
-                            with self._lock:
-                                self._plates_cache = list(plates)
-                    except Exception:
-                        pass
-                    # fecha modal e fica pronto p/ pesquisa
-                    try:
-                        bot._d().execute_script(
-                            "if (typeof hideModalSearchVeiculo === 'function') "
-                            "hideModalSearchVeiculo();"
-                        )
-                    except Exception:
-                        pass
-                    if slot.bot is bot and slot.status in ("ready", "busy"):
+                    # lock do slot: pesquisa espera a lista fechar o modal
+                    with slot.lock:
+                        if not slot.alive() or slot.bot is not bot:
+                            return
+                        if slot.status == "busy":
+                            # pesquisa já pegou o Chrome — não abre modal
+                            logger.info(
+                                "Warm slot %s: pula lista bg (já busy)",
+                                slot.slot_id + 1,
+                            )
+                            return
                         slot.message = (
-                            f"Chrome {slot.slot_id + 1}: Veículos ({n})"
+                            f"Chrome {slot.slot_id + 1}: listando placas…"
                         )
-                    logger.info(
-                        "Warm slot %s: lista com %s veículo(s)",
-                        slot.slot_id + 1,
-                        n,
-                    )
+                        bot.open_vehicle_selector()
+                        bot.load_vehicle_list()
+                        n = bot._count_vehicle_items()
+                        try:
+                            plates = []
+                            if hasattr(bot, "list_vehicles"):
+                                plates = bot.list_vehicles() or []
+                            if not plates and hasattr(self, "list_plates_on_bot"):
+                                try:
+                                    plates = self.list_plates_on_bot(bot) or []
+                                except Exception:
+                                    plates = []
+                            if plates:
+                                with self._lock:
+                                    self._plates_cache = list(plates)
+                        except Exception:
+                            pass
+                        # FECHA o modal (PT + EN) — senão pesquisa/filter quebra
+                        self._close_vehicle_modal_safe(bot)
+                        if slot.bot is bot and slot.status == "ready":
+                            slot.message = (
+                                f"Chrome {slot.slot_id + 1}: Veículos ({n})"
+                            )
+                        logger.info(
+                            "Warm slot %s: lista com %s veículo(s), modal fechado",
+                            slot.slot_id + 1,
+                            n,
+                        )
                 except Exception as e:
                     logger.warning(
                         "Warm slot %s lista placas (bg): %s", slot.slot_id + 1, e
                     )
+                    try:
+                        if slot.bot is bot:
+                            self._close_vehicle_modal_safe(bot)
+                    except Exception:
+                        pass
                     if slot.bot is bot and slot.status == "ready":
                         slot.message = (
                             f"Chrome {slot.slot_id + 1}: PRONTO "
@@ -344,6 +360,43 @@ class WarmPool:
                     self._close_slot_unlocked(slot, keep_status=False)
             self.started_at = ""
             return self.snapshot()
+
+    @staticmethod
+    def _close_vehicle_modal_safe(bot: Any) -> None:
+        """Fecha modal Select Vehicle / Selecione Veículo (PT e EN)."""
+        try:
+            bot._d().execute_script(
+                """
+                try {
+                  if (typeof hideModalSearchVeiculo === 'function') hideModalSearchVeiculo();
+                } catch(e) {}
+                var body = (document.body && document.body.innerText) || '';
+                if (!/Select Vehicle|Selecione Ve[ií]culo/i.test(body)) return 'closed';
+                var nodes = document.querySelectorAll('button,a,input[type=button]');
+                for (var i=0;i<nodes.length;i++){
+                  var t = (nodes[i].innerText||nodes[i].value||'').replace(/\\s+/g,' ').trim();
+                  if (t === 'Cancel' || t === 'Cancelar'){
+                    var r = nodes[i].getBoundingClientRect();
+                    if (r.width > 20 && r.height > 10) {
+                      nodes[i].click();
+                      return 'cancel';
+                    }
+                  }
+                }
+                return 'open';
+                """
+            )
+            bot._sleep(0.3)
+            try:
+                from selenium.webdriver.common.by import By
+                from selenium.webdriver.common.keys import Keys
+
+                bot._d().find_element(By.TAG_NAME, "body").send_keys(Keys.ESCAPE)
+            except Exception:
+                pass
+            bot._sleep(0.2)
+        except Exception as e:
+            logger.warning("close vehicle modal: %s", e)
 
     def _close_slot_unlocked(self, slot: WarmSlot, keep_status: bool = False) -> None:
         if slot.bot is not None:
