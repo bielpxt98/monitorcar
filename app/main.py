@@ -574,22 +574,20 @@ async def warm_status():
 
 @app.post("/warm/start")
 async def warm_start():
-    """Liga o Chrome permanente (login → Posições → modal Veículos)."""
-    import asyncio
-
+    """Liga os 2 Chromes permanentes (em background — página atualiza sozinha)."""
     if not sitrax_configured():
         return RedirectResponse(url="/debug", status_code=303)
 
     def job():
-        from app.bot.warm_pool import warm_pool
+        try:
+            from app.bot.warm_pool import warm_pool
 
-        warm_pool.start(headless=True, low_memory=True)
+            warm_pool.start(headless=True, low_memory=True)
+        except Exception as e:
+            logger.exception("Warm start: %s", e)
 
-    loop = asyncio.get_event_loop()
-    try:
-        await loop.run_in_executor(executor, job)
-    except Exception as e:
-        logger.exception("Warm start: %s", e)
+    # não espera os 2 terminarem — evita “travar” a tela em 1/2
+    executor.submit(job)
     return RedirectResponse(url="/debug", status_code=303)
 
 

@@ -104,10 +104,21 @@
         <button type="submit">Pesquisar placa e voltar a Veículos</button>
       </form>
       <p class="hint" style="margin-top:.6rem;margin-bottom:0">
-        Com o robô <strong>PRONTO</strong>, cada placa reutiliza o mesmo Chrome (sem login de novo).
-        O PDF do teste fica na <a href="/">home</a> para baixar.
+        Espere <strong>2/2 PRONTOS</strong> antes do Todos.
+        Esta página atualiza sozinha a cada 8s enquanto algum Chrome está abrindo.
+        PDF do teste fica na <a href="/">home</a>.
       </p>
     </div>
+    <script>
+      (function () {
+        var w = "{{ warm.status or '' }}";
+        var n = {{ warm.ready_count|default(0) }};
+        var total = {{ warm.slot_count|default(2) }};
+        if (w === 'starting' || w === 'partial' || (n > 0 && n < total)) {
+          setTimeout(function () { location.reload(); }, 8000);
+        }
+      })();
+    </script>
 
     <div class="card">
       <form method="post" action="/calibrar" onsubmit="this.querySelector('button').disabled=true; this.querySelector('button').textContent='Rodando… aguarde 1–3 min';">

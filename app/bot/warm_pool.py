@@ -30,6 +30,7 @@ class WarmSlot:
         self.tmp: Optional[Path] = None
         self.status: str = "off"  # off | starting | ready | busy | error
         self.message: str = "Desligado"
+        self.starting_since: float = 0.0
         self.lock = threading.RLock()
 
     def alive(self) -> bool:
@@ -37,6 +38,11 @@ class WarmSlot:
             return bool(self.bot and self.bot.alive())
         except Exception:
             return False
+
+    def stuck_starting(self, max_sec: float = 120.0) -> bool:
+        if self.status != "starting" or not self.starting_since:
+            return False
+        return (time.time() - self.starting_since) > max_sec
 
 
 class WarmPool:
@@ -57,13 +63,24 @@ class WarmPool:
             slots_info = []
             ready_n = 0
             busy_n = 0
+            starting_n = 0
             for s in self._slots:
                 al = s.alive()
-                st = s.status if al or s.status in ("starting", "error", "off") else "dead"
+                st = s.status
+                if st == "starting" and s.stuck_starting(90):
+                    st = "error"
+                    s.status = "error"
+                    s.message = (
+                        f"Chrome {s.slot_id + 1}: travou ao abrir "
+                        f"(>{int(time.time() - s.starting_since)}s)"
+                    )
+                    self.last_error = s.message
                 if st == "ready" and al:
                     ready_n += 1
                 if st == "busy" and al:
                     busy_n += 1
+                if st == "starting":
+                    starting_n += 1
                 slots_info.append(
                     {
                         "id": s.slot_id + 1,
@@ -74,10 +91,21 @@ class WarmPool:
                     }
                 )
             if ready_n == len(self._slots):
-                status, msg = "ready", f"{ready_n}/{len(self._slots)} Chromes prontos em Veículos"
+                status, msg = (
+                    "ready",
+                    f"{ready_n}/{len(self._slots)} Chromes prontos em Veículos",
+                )
+            elif starting_n and ready_n:
+                status, msg = (
+                    "partial",
+                    f"{ready_n} pronto(s), {starting_n} abrindo…",
+                )
             elif ready_n + busy_n > 0:
-                status, msg = "partial", f"{ready_n} prontos · {busy_n} ocupados / {len(self._slots)}"
-            elif any(s.status == "starting" for s in self._slots):
+                status, msg = (
+                    "partial",
+                    f"{ready_n} prontos · {busy_n} ocupados / {len(self._slots)}",
+                )
+            elif starting_n:
                 status, msg = "starting", "Aquecendo Chromes permanentes…"
             elif any(s.status == "error" for s in self._slots):
                 status, msg = "error", self.last_error or "Erro no pool"
@@ -104,17 +132,43 @@ class WarmPool:
     # ——— lifecycle ———
 
     def start(self, headless: bool = True, low_memory: bool = True) -> dict:
-        """Garante os 2 Chromes permanentes prontos."""
+        """Garante os 2 Chromes permanentes prontos (com retry no 2º)."""
         return self.ensure_both(headless=headless, low_memory=low_memory)
 
     def ensure_both(self, headless: bool = True, low_memory: bool = True) -> dict:
-        for i in range(len(self._slots)):
+        """
+        Sobe os 2 em sequência (Chrome 1 → espera → Chrome 2).
+        Se o 2 falhar/travar, tenta mais 1 vez.
+        """
+        # 1º Chrome
+        try:
+            self._ensure_slot(0, headless=headless, low_memory=low_memory)
+        except Exception as e:
+            logger.exception("Falha ao aquecer slot 1: %s", e)
+            self.last_error = str(e)
+
+        # pequena folga de RAM/sessão antes do 2º
+        time.sleep(4.0)
+
+        # 2º Chrome (até 2 tentativas)
+        for attempt in range(2):
             try:
-                self._ensure_slot(i, headless=headless, low_memory=low_memory)
+                self._ensure_slot(1, headless=headless, low_memory=low_memory)
+                if self._slots[1].alive() and self._slots[1].status == "ready":
+                    break
             except Exception as e:
-                logger.exception("Falha ao aquecer slot %s: %s", i + 1, e)
+                logger.exception(
+                    "Falha ao aquecer slot 2 (tentativa %s): %s", attempt + 1, e
+                )
                 self.last_error = str(e)
-        if not self.started_at:
+                with self._slots[1].lock:
+                    self._close_slot_unlocked(self._slots[1], keep_status=True)
+                    self._slots[1].status = "error"
+                    self._slots[1].message = f"Chrome 2: falha — {e}"
+                if attempt == 0:
+                    time.sleep(5.0)
+
+        if not self.started_at and any(s.alive() for s in self._slots):
             self.started_at = datetime.now().strftime("%d/%m/%Y %H:%M:%S")
         return self.snapshot()
 
@@ -124,9 +178,15 @@ class WarmPool:
         slot = self._slots[idx]
         with slot.lock:
             if slot.alive() and slot.status in ("ready", "busy"):
-                if slot.status == "ready":
-                    return
-                # busy: ok, não reinicia
+                return
+            # travou em "starting" → limpa e tenta de novo
+            if slot.status == "starting" and slot.stuck_starting(90):
+                logger.warning(
+                    "Slot %s stuck starting — forçando restart", idx + 1
+                )
+                self._close_slot_unlocked(slot, keep_status=True)
+            elif slot.status == "starting" and not slot.stuck_starting(90):
+                # outro thread ainda abrindo — não invade
                 return
             self._boot_slot_unlocked(slot, headless=headless, low_memory=low_memory)
 
@@ -138,9 +198,11 @@ class WarmPool:
 
         self._close_slot_unlocked(slot, keep_status=True)
         slot.status = "starting"
+        slot.starting_since = time.time()
         slot.message = f"Chrome {slot.slot_id + 1}: abrindo…"
-        # escalona login (Chrome 2 espera um pouco)
-        time.sleep(slot.slot_id * 3.5)
+        # Chrome 2 espera o 1 estabilizar (sessão Sitrax + RAM)
+        if slot.slot_id > 0:
+            time.sleep(5.0)
 
         tmp = Path(tempfile.mkdtemp(prefix=f"sitrax_warm{slot.slot_id + 1}_"))
         bot: Optional[Any] = None
@@ -150,19 +212,23 @@ class WarmPool:
                     headless=headless,
                     download_dir=tmp,
                     quiet=True,
-                    low_memory=low_memory,
+                    low_memory=True,  # sempre low mem no permanente
                 )
+                slot.message = f"Chrome {slot.slot_id + 1}: iniciando browser…"
                 bot.start()
+                slot.message = f"Chrome {slot.slot_id + 1}: login…"
                 bot.login()
-                time.sleep(1.0)
+                time.sleep(1.2)
+            slot.message = f"Chrome {slot.slot_id + 1}: Posições…"
             bot.open_posicoes()
-            bot._sleep(0.6)
+            bot._sleep(0.8)
             bot.open_vehicle_selector()
             bot.load_vehicle_list()
             n = bot._count_vehicle_items()
             slot.bot = bot
             slot.tmp = tmp
             slot.status = "ready"
+            slot.starting_since = 0.0
             slot.message = f"Chrome {slot.slot_id + 1}: Veículos ({n})"
             debug_session.step(
                 f"warm{slot.slot_id + 1}_pronto",
@@ -173,6 +239,7 @@ class WarmPool:
             logger.info("Warm slot %s ready (%s veículos)", slot.slot_id + 1, n)
         except Exception as e:
             slot.status = "error"
+            slot.starting_since = 0.0
             slot.message = f"Chrome {slot.slot_id + 1}: falha — {e}"
             self.last_error = str(e)
             try:
