@@ -3486,82 +3486,23 @@ class SitraxBot:
             )
 
             # sucesso se clicou Filter e Home/End estavam certos
+            # NÃO espera grade aqui: precisa da PLACA no chip + Filtrar da barra
+            # (prepare_historico_warm faz isso). Só fecha o popup de data.
             if filter_clicked and pop_ok:
                 logger.info(
-                    "Data filtro OK: %s → %s (chip=%r)",
+                    "Data filtro OK: %s → %s (chip=%r) — prepare fará Filtrar barra",
                     ini_br,
                     fim_br,
                     chip_now,
                 )
                 self._trace(
                     "data_filtro_ok",
-                    f"{ini_br}→{fim_br} chip={chip_now!r} filter_clicked=1",
+                    f"{ini_br}→{fim_br} chip={chip_now!r} filter_clicked=1 "
+                    "(grade via prepare+barra)",
                     shot=False,
                 )
-                # SEMPRE espera a grade após Filter Date (pode demorar 5–15s).
-                # Só re-clica Filter da barra se AINDA estiver vazia depois.
-                n_regs = self.wait_after_filter(
-                    min_sec=4.0,
-                    timeout=32.0,
-                    data_ini=data_ini,
-                )
-                try:
-                    n_now = self.count_sitrax_registers()
-                except Exception:
-                    n_now = -1
-                has_rows = False
-                try:
-                    has_rows = self.grid_has_data_rows()
-                except Exception:
-                    pass
-                if n_regs <= 0 and n_now > 0:
-                    n_regs = n_now
-                if n_regs <= 0 and has_rows:
-                    n_regs = n_now if n_now > 0 else 50
-
-                if n_regs > 0 or has_rows:
-                    logger.info(
-                        "Grade OK após Filter Date (count=%s rows=%s) "
-                        "— sem re-Filter barra",
-                        n_regs,
-                        has_rows,
-                    )
-                    self._trace(
-                        "data_apos_filter_grade",
-                        f"Showing={n_regs} (sem re-Filter barra) "
-                        f"count_raw={n_now} has_rows={has_rows}",
-                        shot=False,
-                    )
-                else:
-                    # Grade ainda vazia: 1× Filter da barra e espera de novo
-                    try:
-                        self._trace(
-                            f"data_antes_filter_barra_{attempt}",
-                            "Grade vazia após espera — Filter da barra (laranja)",
-                            shot=False,
-                        )
-                        self.click_filtrar()
-                        n_regs = self.wait_after_filter(
-                            min_sec=4.0,
-                            timeout=30.0,
-                            data_ini=data_ini,
-                        )
-                        n_now = self.count_sitrax_registers()
-                        has_rows = self.grid_has_data_rows()
-                        if n_regs <= 0 and (n_now > 0 or has_rows):
-                            n_regs = n_now if n_now > 0 else 50
-                        logger.info(
-                            "Após data+Filter barra: Showing=%s", n_regs
-                        )
-                        self._trace(
-                            "data_apos_filter_grade",
-                            f"Showing={n_regs} após barra {ini_br}→{fim_br} "
-                            f"has_rows={has_rows}",
-                            shot=False,
-                        )
-                    except Exception as e:
-                        logger.warning("Filter barra após data: %s", e)
-                        self._sleep(3.2)
+                self._wait_loader_gone(12)
+                self._sleep(0.8)
                 return
 
             logger.warning(
@@ -4154,8 +4095,27 @@ class SitraxBot:
 
         self.set_date_filter(data_ini, data_fim)
 
-        # Se a grade JÁ carregou (ex.: Showing=1226), NÃO re-seleciona veículo
-        # nem re-Filter — isso derruba o Chrome (tab crash).
+        # Após popup de data o chip do veículo costuma sumir / grade zera.
+        # Ordem obrigatória: PLACA no chip → data ok → Filtrar da BARRA → espera.
+        def _ensure_vehicle() -> bool:
+            if self.wait_vehicle_chip(placa, timeout=3.5):
+                return True
+            logger.warning(
+                "Chip %s ausente após data — re-seleciona SEM limpar data",
+                placa,
+            )
+            try:
+                if not self._vehicle_modal_open():
+                    self.open_vehicle_selector()
+                self.load_vehicle_list(placa=placa)
+                self.select_vehicle_by_plate(placa)
+                return self.wait_vehicle_chip(placa, timeout=5.0)
+            except Exception as e:
+                logger.warning("re-select após data: %s", e)
+                return False
+
+        chip_v = _ensure_vehicle()
+
         try:
             n = self.count_sitrax_registers()
         except Exception:
@@ -4165,42 +4125,82 @@ class SitraxBot:
             has_rows = self.grid_has_data_rows()
         except Exception:
             pass
-        if (n is not None and n > 0) or has_rows:
+
+        # Só pula Filtrar se JÁ tem dados E a placa certa no chip
+        if chip_v and ((n is not None and n > 20) or has_rows):
             logger.info(
-                "prepare_warm: grade pronta com %s regs (rows=%s) — segue scrape",
+                "prepare_warm: grade pronta %s (rows=%s chip=%s) — scrape",
                 n,
                 has_rows,
+                chip_v,
             )
             self._trace(
                 "prepare_grade_pronta",
-                f"Showing={n} has_rows={has_rows} após data — sem re-Filter/modal",
+                f"Showing={n} has_rows={has_rows} chip={chip_v}",
                 shot=False,
             )
             return
 
-        # grade ainda vazia: tenta re-selecionar placa e Filter
-        if not self.wait_vehicle_chip(placa, timeout=4.0):
-            logger.warning(
-                "Chip %s sumiu após data — re-seleciona SEM limpar data",
-                placa,
-            )
-            try:
-                self.open_vehicle_selector()
-                self.load_vehicle_list(placa=placa)
-                self.select_vehicle_by_plate(placa)
-            except Exception as e:
-                logger.warning("re-select após data: %s", e)
-
+        # Sempre Filtrar da barra com placa confirmada (é o que carrega a grade)
+        self._trace(
+            "prepare_filtrar_barra",
+            f"placa={placa} chip_v={chip_v} count={n} — Filtrar laranja",
+            shot=False,
+        )
         try:
-            if n <= 0 and not self.sitrax_says_no_records():
-                self.click_filtrar()
-                self.wait_after_filter(
-                    min_sec=3.2, timeout=22.0, data_ini=data_ini
-                )
+            self.click_filtrar()
         except Exception as e:
-            logger.warning("click_filtrar após data (warm): %s", e)
-            self._sleep(3.0)
-        self.wait_vehicle_chip(placa, timeout=3.0)
+            logger.warning("click_filtrar prepare: %s", e)
+        n = self.wait_after_filter(
+            min_sec=5.0, timeout=40.0, data_ini=data_ini
+        )
+        has_rows = self.grid_has_data_rows()
+        chip_v = self.vehicle_chip_has_plate(placa)
+
+        # Ainda 0: re-placa + Filter de novo (1×)
+        if (n is None or n <= 0) and not has_rows:
+            logger.warning(
+                "prepare_warm: Showing=%s após 1º Filter — re-placa+Filter",
+                n,
+            )
+            self._trace(
+                "prepare_retry_filter",
+                f"Showing={n} chip_v={chip_v} — re-seleciona e Filtrar",
+                shot=False,
+            )
+            chip_v = _ensure_vehicle()
+            # se data sumiu, reaplica (chip data)
+            try:
+                if not self._date_chip_matches(
+                    data_ini or date.today(),
+                    data_fim or data_ini or date.today(),
+                ):
+                    self.set_date_filter(data_ini, data_fim)
+                    chip_v = _ensure_vehicle()
+            except Exception as e:
+                logger.warning("re-data após 0: %s", e)
+            try:
+                self.click_filtrar()
+            except Exception as e:
+                logger.warning("click_filtrar retry: %s", e)
+            n = self.wait_after_filter(
+                min_sec=5.0, timeout=35.0, data_ini=data_ini
+            )
+            has_rows = self.grid_has_data_rows()
+            chip_v = self.vehicle_chip_has_plate(placa)
+
+        self._trace(
+            "prepare_apos_filtrar",
+            f"Showing={n} has_rows={has_rows} chip_v={chip_v} "
+            f"date={self._read_date_chip_text()!r}",
+            shot=False,
+        )
+        logger.info(
+            "prepare_warm fim: Showing=%s rows=%s chip=%s",
+            n,
+            has_rows,
+            chip_v,
+        )
 
     def prepare_next_fleet_plate(
         self,
@@ -4608,8 +4608,8 @@ class SitraxBot:
         """
         placa_u = self._norm_placa(placa)
         last_rows: list = []
-        # Até 2 tentativas: 2ª só se NÃO for "Mostrando: 0" (zero real = fim)
-        for attempt in range(2):
+        # Até 3 tentativas — NÃO aceita "0 real" na 1ª (costuma ser chip/filter)
+        for attempt in range(3):
             try:
                 self.prepare_historico_warm(
                     placa_u,
@@ -4621,16 +4621,12 @@ class SitraxBot:
                 logger.warning(
                     "prepare frota %s tentativa %s: %s", placa_u, attempt + 1, e
                 )
-                # NÃO reabrir Posições se já estamos na tela — perde o filtro de data
-                if attempt == 0:
+                if attempt < 2:
                     try:
                         if not self._on_posicoes_screen():
                             self.open_posicoes()
                             self._sleep(0.8)
                         else:
-                            logger.info(
-                                "Já em Posições — retenta prepare sem reabrir menu"
-                            )
                             self._sleep(0.5)
                     except Exception:
                         pass
@@ -4644,75 +4640,56 @@ class SitraxBot:
             except Exception:
                 pass
 
-            # Se prepare já deixou a grade cheia (data filter OK), NÃO re-Filter
-            # nem reabre modal — isso crasha o Chrome com 2000+ linhas.
             try:
                 n_ready = self.count_sitrax_registers()
             except Exception:
                 n_ready = -1
-
             chip_ok = self.vehicle_chip_has_plate(placa_u)
             has_ready_rows = False
             try:
                 has_ready_rows = self.grid_has_data_rows()
             except Exception:
                 pass
+
+            # prepare já fez Filtrar+espera; se grade cheia → scrape direto
             if (n_ready is not None and n_ready > 0) or has_ready_rows:
                 if n_ready is None or n_ready < 0:
                     n_ready = 50 if has_ready_rows else 0
                 logger.info(
-                    "fetch %s: grade já com %s — scrape direto",
+                    "fetch %s: grade pronta %s — scrape direto",
                     placa_u,
                     n_ready,
                 )
                 self._trace(
                     f"scrape_direto_{placa_u}",
-                    f"Showing={n_ready} has_rows={has_ready_rows} "
-                    f"— sem re-Filter (evita crash)",
+                    f"Showing={n_ready} has_rows={has_ready_rows} chip={chip_ok}",
                     shot=False,
                 )
                 n_hint = n_ready
-                self._sleep(0.8)  # folga curta; já esperou no set_date_filter
+                self._sleep(0.5)
             else:
-                chip_ok = self.wait_vehicle_chip(placa_u, timeout=6.0)
+                # prepare falhou em carregar — mais um Filtrar com placa
                 if not chip_ok:
-                    logger.warning(
-                        "Chip %s lento (tentativa %s) — re-seleciona",
-                        placa_u,
-                        attempt + 1,
-                    )
                     try:
                         if not self._vehicle_modal_open():
                             self.open_vehicle_selector()
                         self.load_vehicle_list(placa=placa_u)
                         self.select_vehicle_by_plate(placa_u)
-                        chip_ok = self.wait_vehicle_chip(placa_u, timeout=4.0)
+                        chip_ok = self.wait_vehicle_chip(placa_u, timeout=5.0)
                     except Exception as e:
-                        logger.warning("re-select chip lento: %s", e)
+                        logger.warning("re-select fetch: %s", e)
                 try:
                     self.click_filtrar()
                 except Exception as e:
                     logger.warning("re-Filter %s: %s", placa_u, e)
                 n_hint = self.wait_after_filter(
-                    min_sec=3.2,
-                    timeout=30.0,
+                    min_sec=5.0,
+                    timeout=35.0,
                     data_ini=data_ini,
                 )
                 if n_hint <= 0:
-                    n_hint = self.wait_positions_grid(timeout=18)
-                if n_hint == 0 and not (
-                    self.sitrax_says_no_records()
-                    or self.showing_zero_records()
-                ):
-                    try:
-                        self.click_filtrar()
-                    except Exception:
-                        pass
-                    n_hint = self.wait_after_filter(
-                        min_sec=3.0, timeout=20.0, data_ini=data_ini
-                    )
+                    n_hint = self.wait_positions_grid(timeout=20)
 
-            # scrape leve se muitos registros (não scroll agressivo)
             if n_hint and n_hint > 500:
                 self._sleep(0.4)
             else:
@@ -4725,13 +4702,15 @@ class SitraxBot:
             last_rows = rows or []
             n_scrape = len(last_rows)
 
-            # Contagem oficial + linhas na grade
             site_n = self.count_sitrax_registers()
             has_grid = self.grid_has_data_rows()
-            # Zero REAL só com rodapé 0 + msg explícita + SEM linhas na grade
+            chip_ok = chip_ok or self.vehicle_chip_has_plate(placa_u)
+            # Zero REAL: só na última tentativa, com placa no chip e rodapé 0
             zero_real = (
-                site_n == 0
+                attempt >= 2
+                and site_n == 0
                 and not has_grid
+                and chip_ok
                 and (
                     self.sitrax_says_no_records()
                     or self.showing_zero_records()
@@ -4751,7 +4730,6 @@ class SitraxBot:
                 zero_real,
             )
 
-            # Se o site tem N>0 mas scrape 0 → tenta scrape de novo (NÃO é zero)
             if n_scrape == 0 and (has_grid or (site_n is not None and site_n > 0)):
                 self._sleep(0.5)
                 self.try_scroll_all()
@@ -4762,7 +4740,6 @@ class SitraxBot:
                     last_rows = []
                 n_scrape = len(last_rows)
 
-            # Sucesso se leu dados
             if n_scrape > 0:
                 self._trace(
                     f"frota_rows_{placa_u}",
@@ -4772,42 +4749,22 @@ class SitraxBot:
                 )
                 return last_rows
 
-            # Sitrax mostrou explicitamente 0 → OK, sem retry
-            if zero_real and (chip_ok or self.vehicle_chip_has_plate(placa_u)):
+            if zero_real:
                 self._trace(
                     f"frota_sem_dados_{placa_u}",
-                    f"{placa_u}: Sitrax 0 registros no período — OK (sem retry)",
+                    f"{placa_u}: Sitrax 0 registros confirmado (3 tentativas)",
                     ok=True,
                     shot=True,
                 )
                 return []
 
-            # site com dados / grade com linhas / scrape vazio → retry
-            if attempt == 0 and (has_grid or n_hint > 0 or (site_n or 0) > 0):
+            # 1ª/2ª tentativa com 0 → sempre retry completo
+            if attempt < 2:
                 self._trace(
-                    f"frota_scrape_miss_{placa_u}",
-                    f"{placa_u}: site={site_n} has_grid={has_grid} "
-                    f"scrape 0 — retry",
+                    f"frota_retry_{placa_u}",
+                    f"{placa_u}: site={site_n} scrape=0 chip={chip_ok} "
+                    f"— tentativa {attempt + 2}",
                     ok=False,
-                )
-                continue
-
-            # n_hint==0 sem toast de vazio: ainda pode ser lento — 1 retry
-            if attempt == 0 and n_hint == 0 and not zero_real:
-                self._trace(
-                    f"frota_grid_lento_{placa_u}",
-                    f"{placa_u}: grade ainda vazia sem msg de 0 — retry",
-                    ok=False,
-                )
-                continue
-
-            # chip nunca confirmou E sem dados → aí sim refaz select
-            if attempt == 0 and not chip_ok:
-                self._trace(
-                    f"chip_sem_{placa_u}",
-                    f"Chip {placa_u} não confirmado e sem dados — refaz select",
-                    ok=False,
-                    shot=True,
                 )
                 try:
                     self.clear_vehicle_chip()
@@ -4817,8 +4774,8 @@ class SitraxBot:
 
             self._save_debug(
                 f"frota_zero_{placa_u}_t{attempt+1}",
-                f"0 posições para {placa_u} tentativa {attempt+1} "
-                f"(zero_real={zero_real} n_hint={n_hint} chip={chip_ok})",
+                f"0 posições para {placa_u} "
+                f"(site={site_n} n_hint={n_hint} chip={chip_ok})",
                 ok=False,
             )
             break
