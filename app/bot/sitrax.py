@@ -1825,10 +1825,11 @@ class SitraxBot:
 
     def _click_date_chip(self) -> bool:
         """
-        Clica no chip ROXO da barra de filtros (onde o mouse do usuário aponta):
-          EN: Date: 11/07/2026 00:00:00 Until 11/07/2026 23:59:59
-          PT: Data: 10/07/2026 00:00:00 Até 10/07/2026 23:59:59
-        NÃO clica em Vehicle/Veículo nem no Filter laranja.
+        PRIMEIRO clique = na DATA ESCRITA roxa da barra (ex.: 11/07/2026 00:00:00),
+        não no rótulo "Date"/"Data" sozinho.
+
+        Abre o popup Filtro Data.
+        NÃO clica Vehicle nem Filter laranja.
         """
         d = self._d()
         try:
@@ -1836,85 +1837,105 @@ class SitraxBot:
                 self._js_is_purple()
                 + """
                 var candidates = [];
-                var nodes = document.querySelectorAll('span,div,a,button,label,p,li,td,b,em,font');
+                var nodes = document.querySelectorAll('span,div,a,button,label,p,li,td,b,em,font,u');
                 for (var i=0;i<nodes.length;i++){
                   var el = nodes[i];
                   var t = norm(el.innerText || el.textContent);
-                  if (!t || t.length < 6 || t.length > 160) continue;
+                  if (!t || t.length < 8 || t.length > 160) continue;
+                  // PRECISA ter data escrita DD/MM/AAAA
                   if (!/\\d{2}\\/\\d{2}\\/\\d{4}/.test(t)) continue;
-                  // rejeita veículo e popup e tabela
+                  // rejeita veículo, tabela, popup já aberto
                   if (/Ve[ií]culo\\s*:|Vehicle\\s*:/i.test(t)) continue;
                   if (/Filtro\\s*Data|Date\\s*Filter/i.test(t) && /In[ií]cio|Fechar|Close/i.test(t)) continue;
                   if (/Mostrando|Showing|Parked|Estacionado|GPS Date|Data GPS|Data Sistema/i.test(t)) continue;
                   if (/^\\s*(Filtrar|Filter|Fechar|Close)\\s*$/i.test(t)) continue;
+                  // evita linhas da grade (muitas datas + modo)
+                  if (/Normal|Alert|Ignition|Estacionado/i.test(t) && t.length > 40) continue;
 
-                  var hasLabel = /\\bDate\\s*:/i.test(t) || /\\bData\\s*:/i.test(t);
                   var hasUntil = /\\bUntil\\b|\\bAt[eé]\\b/i.test(t);
+                  var hasLabel = /\\bDate\\s*:/i.test(t) || /\\bData\\s*:/i.test(t);
                   var purple = isPurple(el);
                   var dates = t.match(/\\d{2}\\/\\d{2}\\/\\d{4}/g) || [];
-                  // aceita: rótulo Date/Data, ou Until/Até, ou texto roxo com data na barra
-                  if (!(hasLabel || hasUntil || (purple && dates.length >= 1))) continue;
+                  // só a data escrita: 11/07/2026 00:00:00
+                  var onlyWritten = /^\\d{2}\\/\\d{2}\\/\\d{4}(\\s+\\d{2}:\\d{2}(:\\d{2})?)?$/.test(t);
+                  // trecho com Until/Até e datas (chip inteiro roxo)
+                  var isBarDate = hasUntil || hasLabel || onlyWritten || (purple && dates.length >= 1);
+                  if (!isBarDate) continue;
 
                   var r = el.getBoundingClientRect();
-                  if (r.width < 25 || r.height < 5 || r.height > 100) continue;
+                  if (r.width < 18 || r.height < 5 || r.height > 90) continue;
                   if (r.top < 0 || r.top > 380) continue;
-                  if (r.left < 40) continue; // evita menu
+                  if (r.left < 30) continue;
 
-                  // score: roxo + until + label + menor nó
+                  // PRIORIDADE: data escrita pequena e roxa (11/07/...) — score baixo = melhor
                   var score = t.length
                     + r.top * 0.05
-                    - (purple ? 80 : 0)
-                    - (hasUntil ? 40 : 0)
-                    - (hasLabel ? 30 : 0)
-                    - (dates.length >= 2 ? 15 : 0);
-                  candidates.push({el:el, t:t, score:score, purple:purple});
+                    - (onlyWritten ? 120 : 0)   // melhor: só a data escrita
+                    - (purple ? 90 : 0)
+                    - (hasUntil ? 50 : 0)
+                    - (dates.length >= 2 ? 20 : 0)
+                    - (hasLabel && !onlyWritten ? 10 : 0);
+                  // preferir nós folha (poucos filhos)
+                  score += (el.children ? el.children.length * 3 : 0);
+                  candidates.push({el:el, t:t, score:score, purple:purple, only:onlyWritten});
                 }
                 candidates.sort(function(a,b){ return a.score - b.score; });
-                if (!candidates.length){
-                  // fallback agressivo: qualquer Until/Até com data no topo
-                  for (var i=0;i<nodes.length;i++){
-                    var el = nodes[i];
-                    var t = norm(el.innerText || el.textContent);
-                    if (!/Until|At[eé]/i.test(t)) continue;
-                    if (!/\\d{2}\\/\\d{2}\\/\\d{4}/.test(t)) continue;
-                    var r = el.getBoundingClientRect();
-                    if (r.top > 0 && r.top < 400 && r.width > 40)
-                      candidates.push({el:el, t:t, score:t.length, purple:false});
-                  }
-                  candidates.sort(function(a,b){ return a.score - b.score; });
-                }
                 if (!candidates.length) return {ok:false, n:0, reason:'none'};
-                // clica o melhor; se for container grande, tenta filho roxo
+
+                // clica na DATA ESCRITA: se o melhor for container, desce no filho com DD/MM
                 var c = candidates[0];
                 var target = c.el;
-                var kids = c.el.querySelectorAll('span,a,b,em,div,font');
+                var kids = c.el.querySelectorAll('span,a,b,em,div,font,u');
+                var writtenKids = [];
                 for (var j=0;j<kids.length;j++){
-                  if (isPurple(kids[j]) && /\\d{2}\\/\\d{2}\\/\\d{4}/.test(norm(kids[j].innerText||''))){
-                    target = kids[j];
-                    break;
-                  }
+                  var kt = norm(kids[j].innerText || '');
+                  if (!/\\d{2}\\/\\d{2}\\/\\d{4}/.test(kt)) continue;
+                  if (kt.length > 40) continue;
+                  if (/Ve[ií]culo|Vehicle/i.test(kt)) continue;
+                  var kr = kids[j].getBoundingClientRect();
+                  if (kr.width < 10 || kr.height < 4) continue;
+                  writtenKids.push({
+                    el: kids[j],
+                    t: kt,
+                    purple: isPurple(kids[j]),
+                    only: /^\\d{2}\\/\\d{2}\\/\\d{4}/.test(kt),
+                    left: kr.left
+                  });
+                }
+                // 1ª data escrita da esquerda (início do período no chip)
+                if (writtenKids.length){
+                  writtenKids.sort(function(a,b){
+                    return (b.purple - a.purple) || (a.left - b.left) || (a.t.length - b.t.length);
+                  });
+                  target = writtenKids[0].el;
                 }
                 forceClick(target);
-                return {ok:true, t:norm(target.innerText||c.t).slice(0,100), n:candidates.length, purple:!!c.purple};
+                return {
+                  ok: true,
+                  t: norm(target.innerText || c.t).slice(0, 80),
+                  n: candidates.length,
+                  purple: isPurple(target),
+                  kind: 'written_date'
+                };
                 """
             )
             if clicked and clicked.get("ok"):
                 logger.info(
-                    "Clicou chip Data ROXO: %s (n=%s purple=%s)",
+                    "Clicou DATA ESCRITA na barra: %s (n=%s purple=%s)",
                     clicked.get("t"),
                     clicked.get("n"),
                     clicked.get("purple"),
                 )
                 return True
-            logger.warning("Chip Data JS falhou: %s", clicked)
+            logger.warning("Clique data escrita falhou: %s", clicked)
         except Exception as e:
-            logger.warning("JS click chip data: %s", e)
+            logger.warning("JS click data escrita: %s", e)
 
-        # Selenium XPath: Until / Até / Date: / Data:
+        # Selenium: clica o primeiro texto com DD/MM/AAAA na barra de filtros
         for xp in [
+            "//*[contains(text(),'/') and (contains(text(),':') or contains(.,'Until') or contains(.,'Até'))]",
             "//*[contains(translate(.,'UNTIL','until'),'until') and contains(.,'/')]",
             "//*[contains(.,'Até') and contains(.,'/')]",
-            "//*[contains(.,'Ate') and contains(.,'/')]",
             "//*[contains(.,'Date:') and contains(.,'/')]",
             "//*[contains(.,'Data:') and contains(.,'/')]",
         ]:
@@ -1931,12 +1952,21 @@ class SitraxBot:
                         continue
                     if not el.is_displayed():
                         continue
-                    # clica centro
+                    # se o elemento tem filhos com só a data, clica o 1º
+                    target = el
                     try:
-                        ActionChains(d).move_to_element(el).pause(0.1).click().perform()
+                        for child in el.find_elements(By.CSS_SELECTOR, "span,a,b,em,div"):
+                            ct = (child.text or "").strip()
+                            if re.match(r"^\d{2}/\d{2}/\d{4}", ct) and len(ct) < 30:
+                                target = child
+                                break
                     except Exception:
-                        self._click(el)
-                    logger.info("Clicou chip Data (selenium): %s", t[:90])
+                        pass
+                    try:
+                        ActionChains(d).move_to_element(target).pause(0.12).click().perform()
+                    except Exception:
+                        self._click(target)
+                    logger.info("Clicou data escrita (selenium): %s", t[:90])
                     return True
                 except Exception:
                     continue
@@ -2483,7 +2513,8 @@ class SitraxBot:
 
         - Mesmo dia (início == fim): comportamento de antes — se o chip
           já está nesse dia, NÃO mexe; só altera se precisar (1 dia no calendário).
-        - Dias diferentes: fluxo completo (chip roxo → Início → dia1 → dia2 → Filtrar).
+        - Dias diferentes: 1º clique na data escrita (11/07…) → popup →
+          Início/calendário dia1 → dia2 → Filtrar.
         """
         data_ini = data_ini or date.today()
         data_fim = data_fim or data_ini
@@ -2503,7 +2534,7 @@ class SitraxBot:
         multi_day = data_ini != data_fim
         if multi_day:
             logger.info(
-                "Período multi-dia %s → %s — fluxo calendário completo",
+                "Período multi-dia %s → %s — 1º clique na data escrita",
                 ini_br,
                 fim_br,
             )
@@ -2537,27 +2568,33 @@ class SitraxBot:
             except Exception:
                 pass
 
-            # 1) chip ROXO da barra (não o Vehicle)
+            # 1) PRIMEIRO clique = data ESCRITA roxa (11/07/2026 …), não o rótulo Date
             if not self._click_date_chip():
-                logger.warning("Chip Data ROXO sumiu (tentativa %s)", attempt)
+                logger.warning(
+                    "Data escrita na barra sumiu (tentativa %s)", attempt
+                )
                 self._save_debug(f"data_chip_sumiu_{attempt}")
                 self._sleep(0.4)
                 if not self._click_date_chip():
                     continue
 
-            self._sleep(0.75)
+            self._sleep(0.85)
             opened = self._wait_filtro_data_popup(5.0)
             self._save_debug(f"data_apos_chip_{attempt}")
             if not opened:
                 logger.warning(
-                    "Popup Filtro Data não abriu — 2º clique no chip (tentativa %s)",
+                    "Popup não abriu — clica de novo na data escrita (tentativa %s)",
                     attempt,
                 )
+                # 2º clique: tenta de novo na data escrita (centro do texto)
                 self._click_date_chip()
-                self._sleep(0.6)
+                self._sleep(0.7)
                 opened = self._wait_filtro_data_popup(4.0)
 
             if not opened:
+                logger.warning(
+                    "Popup Filtro Data ainda fechado (tentativa %s)", attempt
+                )
                 continue
 
             # 2) clica a 1ª data roxa (Início)
