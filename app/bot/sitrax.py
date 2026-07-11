@@ -312,18 +312,35 @@ class SitraxBot:
                 ActionChains(d).move_to_element(element).click().perform()
 
     def _save_debug(self, label: str, message: str = "", ok: bool = True) -> Path:
-        """Salva screenshot + HTML e registra no painel de calibração."""
+        """Salva screenshot + registra no painel. Em quiet (warm/frota): sem foto/HTML (evita tab crash)."""
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
         safe = re.sub(r"[^a-zA-Z0-9_-]+", "_", label)[:40]
         png = DEBUG_DIR / f"{ts}_{safe}.png"
+        # quiet = sessão quente: NÃO tira screenshot de página com 2000+ linhas (derruba Chrome)
+        if self.quiet:
+            try:
+                debug_session.step(
+                    label,
+                    message or label,
+                    driver=None,
+                    ok=ok,
+                    screenshot=False,
+                    html=False,
+                )
+            except Exception:
+                pass
+            return png
         html = DEBUG_DIR / f"{ts}_{safe}.html"
         try:
             self._d().save_screenshot(str(png))
-            html.write_text(self._d().page_source, encoding="utf-8", errors="replace")
-            logger.info("Debug salvo: %s | %s | URL=%s", png, html, self._d().current_url)
+            # HTML completo de página enorme estoura RAM no Railway
+            src = self._d().page_source or ""
+            if len(src) > 400_000:
+                src = src[:200_000] + "\n<!-- truncated -->\n" + src[-50_000:]
+            html.write_text(src, encoding="utf-8", errors="replace")
+            logger.info("Debug salvo: %s | URL=%s", png, self._d().current_url)
         except Exception as e:
             logger.warning("Falha ao salvar debug: %s", e)
-        # painel /debug (memória)
         try:
             debug_session.step(
                 label,
@@ -3475,49 +3492,54 @@ class SitraxBot:
                 self._trace(
                     "data_filtro_ok",
                     f"{ini_br}→{fim_br} chip={chip_now!r} filter_clicked=1",
-                    shot=True,
+                    shot=False,
                 )
-                # Filter da BARRA + foto + espera ~3s
+                # Se a grade JÁ tem muitos registros (Filter do popup aplicou),
+                # NÃO clica Filter da barra de novo (evita tab crash com 2000+ linhas)
                 try:
-                    self._save_debug(
-                        f"data_antes_filter_barra_{attempt}",
-                        "Antes do Filter grande da barra",
-                    )
-                    self._trace(
-                        f"data_antes_filter_barra_{attempt}",
-                        "Clicando Filter da barra (laranja)",
-                        shot=True,
-                    )
-                    self.click_filtrar()
-                    self._save_debug(
-                        f"data_depois_filter_barra_{attempt}",
-                        "Depois do Filter da barra",
-                    )
-                    self._trace(
-                        f"data_depois_filter_barra_{attempt}",
-                        "Filter barra clicado — aguardando grade ~3s",
-                        shot=True,
+                    n_now = self.count_sitrax_registers()
+                except Exception:
+                    n_now = -1
+                if n_now and n_now > 20:
+                    logger.info(
+                        "Grade já com %s regs após Filter Date — só espera estabilizar",
+                        n_now,
                     )
                     n_regs = self.wait_after_filter(
-                        min_sec=3.2,
-                        timeout=28.0,
+                        min_sec=3.0,
+                        timeout=20.0,
                         data_ini=data_ini,
-                    )
-                    logger.info(
-                        "Após data+Filter barra: Showing=%s", n_regs
                     )
                     self._trace(
                         "data_apos_filter_grade",
-                        f"Showing={n_regs} após período {ini_br}→{fim_br}",
-                        shot=True,
+                        f"Showing={n_regs} (sem re-Filter barra)",
+                        shot=False,
                     )
-                    self._save_debug(
-                        "data_apos_filter_grade",
-                        f"Showing={n_regs}",
-                    )
-                except Exception as e:
-                    logger.warning("Filter barra após data: %s", e)
-                    self._sleep(3.2)
+                else:
+                    # Filter da BARRA só se a grade ainda não atualizou
+                    try:
+                        self._trace(
+                            f"data_antes_filter_barra_{attempt}",
+                            "Clicando Filter da barra (laranja)",
+                            shot=False,
+                        )
+                        self.click_filtrar()
+                        n_regs = self.wait_after_filter(
+                            min_sec=3.2,
+                            timeout=28.0,
+                            data_ini=data_ini,
+                        )
+                        logger.info(
+                            "Após data+Filter barra: Showing=%s", n_regs
+                        )
+                        self._trace(
+                            "data_apos_filter_grade",
+                            f"Showing={n_regs} após período {ini_br}→{fim_br}",
+                            shot=False,
+                        )
+                    except Exception as e:
+                        logger.warning("Filter barra após data: %s", e)
+                        self._sleep(3.2)
                 return
 
             logger.warning(
@@ -4119,16 +4141,22 @@ class SitraxBot:
             except Exception as e:
                 logger.warning("re-select após data: %s", e)
 
-        # set_date_filter já clica Filter + espera ~3s; reforço se grade ainda 0
+        # set_date_filter já aplica Filter Date + espera grade se possível
+        # Só re-Filter da barra se Showing ainda 0 / sem dados
         try:
             n = self.count_sitrax_registers()
-            if n <= 0 and not self.sitrax_says_no_records():
+            if n is not None and n > 20:
+                logger.info(
+                    "prepare_warm: grade já com %s regs — sem re-Filter", n
+                )
+            elif n <= 0 and not self.sitrax_says_no_records():
                 self.click_filtrar()
-                self.wait_after_filter(min_sec=3.2, timeout=22.0, data_ini=data_ini)
+                self.wait_after_filter(
+                    min_sec=3.2, timeout=22.0, data_ini=data_ini
+                )
         except Exception as e:
             logger.warning("click_filtrar após data (warm): %s", e)
             self._sleep(3.0)
-        # última checagem de chip (evita chip_lento falso)
         self.wait_vehicle_chip(placa, timeout=4.0)
 
     def prepare_next_fleet_plate(

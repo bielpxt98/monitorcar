@@ -269,20 +269,22 @@ class WarmPool:
                 _elapsed(),
             )
 
-            # lista veículos em background — NÃO trava o status PRONTO,
-            # mas segura slot.lock para não brigar com pesquisa/login
+            # Lista de placas: só se ninguém pesquisar em ~2s (não trava o gerar)
             def _load_plates() -> None:
+                time.sleep(2.0)  # dá tempo do status PRONTO aparecer
                 try:
-                    # lock do slot: pesquisa espera a lista fechar o modal
-                    with slot.lock:
+                    # try_lock: se pesquisa já pegou, desiste da lista
+                    got = slot.lock.acquire(blocking=False)
+                    if not got:
+                        logger.info(
+                            "Warm slot %s: lista bg cancelada (lock ocupado)",
+                            slot.slot_id + 1,
+                        )
+                        return
+                    try:
                         if not slot.alive() or slot.bot is not bot:
                             return
                         if slot.status == "busy":
-                            # pesquisa já pegou o Chrome — não abre modal
-                            logger.info(
-                                "Warm slot %s: pula lista bg (já busy)",
-                                slot.slot_id + 1,
-                            )
                             return
                         slot.message = (
                             f"Chrome {slot.slot_id + 1}: listando placas…"
@@ -301,17 +303,18 @@ class WarmPool:
                                     self._plates_cache = list(plates)
                         except Exception:
                             pass
-                        # FECHA o modal (PT + EN) — senão pesquisa/filter quebra
                         self._close_vehicle_modal_safe(bot)
                         if slot.bot is bot and slot.status == "ready":
                             slot.message = (
                                 f"Chrome {slot.slot_id + 1}: Veículos ({n})"
                             )
                         logger.info(
-                            "Warm slot %s: lista com %s veículo(s), modal fechado",
+                            "Warm slot %s: lista %s veículos, modal fechado",
                             slot.slot_id + 1,
                             n,
                         )
+                    finally:
+                        slot.lock.release()
                 except Exception as e:
                     logger.warning(
                         "Warm slot %s lista placas (bg): %s", slot.slot_id + 1, e
@@ -323,8 +326,7 @@ class WarmPool:
                         pass
                     if slot.bot is bot and slot.status == "ready":
                         slot.message = (
-                            f"Chrome {slot.slot_id + 1}: PRONTO "
-                            f"(lista depois falhou: {e})"
+                            f"Chrome {slot.slot_id + 1}: PRONTO"
                         )
 
             threading.Thread(
