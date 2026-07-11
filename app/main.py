@@ -83,6 +83,20 @@ _JOB: dict = {
     "error": "",
     "done": False,
 }
+# flash one-shot (POST /gerar → redirect /) para a URL voltar à home
+_FLASH: dict = {"error": None, "job_msg": None, "placa": None}
+
+
+def _pop_flash() -> dict:
+    out = {
+        "error": _FLASH.get("error"),
+        "job_msg": _FLASH.get("job_msg"),
+        "placa": _FLASH.get("placa"),
+    }
+    _FLASH["error"] = None
+    _FLASH["job_msg"] = None
+    _FLASH["placa"] = None
+    return out
 
 
 def parse_date(value: str) -> Optional[date]:
@@ -99,17 +113,24 @@ def parse_date(value: str) -> Optional[date]:
 
 @app.get("/", response_class=HTMLResponse)
 async def home(request: Request):
+    flash = _pop_flash()
+    job_err = (
+        _JOB.get("error")
+        if _JOB.get("done") and not _LAST_REPORT.get("pdf_bytes")
+        else None
+    )
     return templates.TemplateResponse(
         request,
         "index.html",
         {
             "configured": sitrax_configured(),
             "today": date.today().isoformat(),
-            "error": _JOB.get("error") if _JOB.get("done") and not _LAST_REPORT.get("pdf_bytes") else None,
+            "error": flash.get("error") or job_err,
             "texto": _LAST_REPORT.get("texto"),
             "has_pdf": bool(_LAST_REPORT.get("pdf_bytes")),
             "pdf_name": _LAST_REPORT.get("pdf_filename"),
-            "job_msg": None,
+            "placa": flash.get("placa") or _LAST_REPORT.get("placa") or "",
+            "job_msg": flash.get("job_msg"),
             "job_running": bool(_JOB.get("running")),
             "job_status": _JOB.get("message") or "",
         },
@@ -376,7 +397,7 @@ async def gerar_get():
     return RedirectResponse(url="/", status_code=303)
 
 
-@app.post("/gerar-pdf", response_class=HTMLResponse)
+@app.post("/gerar-pdf")
 async def gerar_pdf(
     request: Request,
     pdf: UploadFile = File(...),
@@ -389,14 +410,11 @@ async def gerar_pdf(
       - servidor parseia em pasta TEMP
       - gera 1 PDF-resumo
       - apaga o bruto
+      - redireciona para a home (/)
     """
     import asyncio
 
     error = None
-    texto = None
-    has_pdf = False
-    pdf_name = None
-
     name = (pdf.filename or "").lower()
     if not name.endswith(".pdf"):
         error = "Envie um arquivo .pdf (histórico do Sitrax)."
@@ -416,7 +434,6 @@ async def gerar_pdf(
                 with TempWorkspace(prefix="upload_") as tmp:
                     bruto = tmp / "sitrax_upload.pdf"
                     bruto.write_bytes(raw)
-                    # ao sair do with, o PDF bruto é apagado do servidor
                     return report_from_sitrax_pdf(
                         bruto,
                         placa=placa.strip() or None,
@@ -425,35 +442,14 @@ async def gerar_pdf(
 
             loop = asyncio.get_event_loop()
             result = await loop.run_in_executor(executor, process)
-            _LAST_REPORT.clear()
-            _LAST_REPORT.update(
-                {
-                    "pdf_bytes": result.pdf_bytes,
-                    "pdf_filename": result.pdf_filename,
-                    "texto": result.texto,
-                    "placa": result.placa,
-                }
-            )
-            texto = result.texto
-            has_pdf = True
-            pdf_name = result.pdf_filename
+            _store_result(result)
         except Exception as e:
             logger.exception("Erro no upload PDF")
             error = f"{type(e).__name__}: {e}"
 
-    return templates.TemplateResponse(
-        request,
-        "index.html",
-        {
-            "configured": sitrax_configured(),
-            "today": date.today().isoformat(),
-            "error": error,
-            "texto": texto,
-            "has_pdf": has_pdf,
-            "pdf_name": pdf_name,
-            "placa": placa,
-        },
-    )
+    _FLASH["error"] = error
+    _FLASH["placa"] = (placa or "").strip().upper() or None
+    return RedirectResponse(url="/", status_code=303)
 
 
 def _store_result(result) -> None:
@@ -505,7 +501,7 @@ def _start_bg_job(modo: str, placa: str, d_ini: date, d_fim: date) -> bool:
     return True
 
 
-@app.post("/gerar", response_class=HTMLResponse)
+@app.post("/gerar")
 async def gerar(
     request: Request,
     modo: str = Form(...),
@@ -514,17 +510,14 @@ async def gerar(
     data_fim: str = Form(""),
 ):
     """
-    1 placa: espera o resultado (minutos).
-    Todos (frota): roda em BACKGROUND — evita "upstream error" do proxy Railway
-    em jobs longos; acompanhe /debug e volte na home para baixar.
+    1 placa: espera o resultado e redireciona para / (home).
+    Todos (frota): BACKGROUND e redireciona para / — evita ficar em /gerar.
     """
     import asyncio
 
     error = None
-    texto = None
-    has_pdf = False
-    pdf_name = None
     job_msg = None
+    placa_u = (placa or "").strip().upper()
 
     if not sitrax_configured():
         error = "Servidor sem credenciais Sitrax (.env). Contate o administrador."
@@ -534,12 +527,10 @@ async def gerar(
         d_ini = parse_date(data_ini) or date.today()
         d_fim = parse_date(data_fim) or d_ini
         modo_n = (modo or "placa").lower()
-        placa_u = (placa or "").strip().upper()
         if placa_u in ("TODOS", "TODAS", "ALL", "FROTA", "*"):
             modo_n = "todos"
 
         if modo_n == "todos":
-            # BACKGROUND — frota demora 10–30+ min; proxy corta conexão síncrona
             if _JOB.get("running"):
                 job_msg = (
                     f"Já há um job em andamento desde {_JOB.get('started')}: "
@@ -551,13 +542,12 @@ async def gerar(
                     job_msg = (
                         "Frota iniciada em segundo plano (evita erro upstream). "
                         "Acompanhe os passos em Calibração (/debug). "
-                        "Quando terminar, volte aqui e use Baixar PDF do resumo. "
+                        "Quando terminar, baixe o PDF do resumo aqui. "
                         "A página atualiza sozinha a cada 15s."
                     )
                 else:
                     job_msg = "Não foi possível iniciar o job (ocupado)."
         else:
-            # 1 placa — espera (ainda pode demorar 1–3 min)
             loop = asyncio.get_event_loop()
             try:
                 result = await loop.run_in_executor(
@@ -565,38 +555,15 @@ async def gerar(
                     lambda: _run_job("placa", placa, d_ini, d_fim),
                 )
                 _store_result(result)
-                texto = result.texto
-                has_pdf = True
-                pdf_name = result.pdf_filename
             except Exception as e:
                 logger.exception("Erro ao gerar")
                 error = f"{type(e).__name__}: {e}"
 
-    # se job terminou enquanto a home abre, mostra resultado
-    if not texto and _LAST_REPORT.get("texto") and not _JOB.get("running"):
-        texto = _LAST_REPORT.get("texto")
-        has_pdf = bool(_LAST_REPORT.get("pdf_bytes"))
-        pdf_name = _LAST_REPORT.get("pdf_filename")
-
-    return templates.TemplateResponse(
-        request,
-        "index.html",
-        {
-            "configured": sitrax_configured(),
-            "today": date.today().isoformat(),
-            "error": error,
-            "texto": texto,
-            "has_pdf": has_pdf,
-            "pdf_name": pdf_name,
-            "modo": modo,
-            "placa": placa,
-            "data_ini": data_ini,
-            "data_fim": data_fim,
-            "job_msg": job_msg,
-            "job_running": bool(_JOB.get("running")),
-            "job_status": _JOB.get("message") or "",
-        },
-    )
+    _FLASH["error"] = error
+    _FLASH["job_msg"] = job_msg
+    _FLASH["placa"] = placa_u if placa_u else None
+    # URL volta para a home (não fica em /gerar)
+    return RedirectResponse(url="/", status_code=303)
 
 
 @app.get("/job-status")
@@ -764,9 +731,14 @@ async def warm_testar(
     try:
         result = await loop.run_in_executor(executor, job)
         _store_result(result)
+        _FLASH["error"] = None
+        _FLASH["placa"] = placa_u
     except Exception as e:
         logger.exception("Warm testar %s: %s", placa_u, e)
-    return RedirectResponse(url="/debug", status_code=303)
+        _FLASH["error"] = f"{type(e).__name__}: {e}"
+        _FLASH["placa"] = placa_u
+    # Volta para a home (não fica em /debug nem /gerar)
+    return RedirectResponse(url="/", status_code=303)
 
 
 @app.post("/calibrar", response_class=HTMLResponse)
