@@ -56,17 +56,16 @@
     </p>
 
     <div class="card">
-      <h2 style="font-size:1.05rem;margin:0 0 .5rem">2 Chromes permanentes (Veículos)</h2>
+      <h2 style="font-size:1.05rem;margin:0 0 .5rem">Chrome permanente (Veículos)</h2>
       {% set w = warm or {} %}
       <p class="hint" style="margin:0 0 .5rem">
-        Ligam <strong>sozinhos</strong> no deploy e o sistema <strong>religa</strong> se algum cair.
-        Botão manual só se quiser forçar agora.
+        <strong>1 Chrome</strong> (estável no Railway). Liga <strong>sozinho</strong> e religa se cair.
+        Frota Todos: sequencial, reinicia só se travar.
       </p>
       <p style="margin:.25rem 0">
         Status:
-        {% if w.ready_count is defined and w.ready_count >= 2 %}<span class="status-ok">2/2 PRONTOS</span>
-        {% elif w.ready %}<span class="status-ok">{{ w.ready_count or 1 }}/2 pronto</span>
-        {% elif w.status == 'busy' or w.status == 'partial' %}<span class="status-run">{{ w.message or 'parcial' }}</span>
+        {% if w.ready %}<span class="status-ok">PRONTO em Veículos</span>
+        {% elif w.status == 'busy' or w.status == 'partial' %}<span class="status-run">{{ w.message or 'ocupado' }}</span>
         {% elif w.status == 'starting' %}<span class="status-run">aquecendo…</span>
         {% elif w.status == 'error' %}<span class="status-err">erro</span>
         {% else %}<span class="status-run">{{ w.status or 'off' }}</span>{% endif %}
@@ -90,11 +89,11 @@
 
       <div style="display:flex;gap:.5rem;flex-wrap:wrap;margin-top:.75rem">
         <form method="post" action="/warm/start" style="flex:1;min-width:140px"
-              onsubmit="this.querySelector('button').disabled=true;this.querySelector('button').textContent='Abrindo 2…'">
-          <button type="submit">Ligar 2 Chromes em Veículos</button>
+              onsubmit="this.querySelector('button').disabled=true;this.querySelector('button').textContent='Abrindo…'">
+          <button type="submit">Ligar Chrome em Veículos</button>
         </form>
         <form method="post" action="/warm/stop" style="flex:1;min-width:120px">
-          <button type="submit" style="background:#374151">Desligar os 2</button>
+          <button type="submit" style="background:#374151">Desligar Chrome</button>
         </form>
       </div>
 
@@ -108,8 +107,8 @@
         <button type="submit">Pesquisar placa e voltar a Veículos</button>
       </form>
       <p class="hint" style="margin-top:.6rem;margin-bottom:0">
-        Espere <strong>2/2 PRONTOS</strong> antes do Todos.
-        Esta página atualiza sozinha a cada 8s enquanto algum Chrome está abrindo.
+        Espere status <strong>PRONTO</strong> antes do Todos.
+        Esta página atualiza sozinha a cada 8s enquanto o Chrome está abrindo.
         PDF do teste fica na <a href="/">home</a>.
       </p>
     </div>

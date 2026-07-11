@@ -53,15 +53,10 @@ async def lifespan(app: FastAPI):
                 from app.bot.warm_pool import warm_pool
 
                 logger.info(
-                    "Auto-start: 2 Chromes permanentes (login → Veículos)…"
+                    "Auto-start: 1 Chrome permanente (login → Veículos)…"
                 )
                 snap = warm_pool.start(headless=True, low_memory=True)
                 logger.info("Pool permanente: %s", snap.get("message"))
-                # reforço: se só 1 subiu, tenta o 2º de novo
-                if int(snap.get("ready_count") or 0) < 2:
-                    time.sleep(8)
-                    snap = warm_pool.ensure_both(headless=True, low_memory=True)
-                    logger.info("Pool após reforço: %s", snap.get("message"))
             except Exception as e:
                 logger.exception("Falha ao aquecer pool no startup: %s", e)
 
@@ -178,7 +173,7 @@ def _run_job(modo: str, placa: str, d_ini: date, d_fim: date):
             headless=True,
         )
 
-    # ——— TODOS: 2 Chromes permanentes em paralelo (round-robin) ———
+    # ——— TODOS: 1 Chrome permanente (estável; mais pontos completos) ———
     from app.bot.summary_pdf import build_summary_pdf_bytes, safe_filename
     from app.bot.fleet_workers import run_fleet_parallel, DEFAULT_WORKERS
     from app.bot.warm_pool import warm_pool
@@ -189,15 +184,13 @@ def _run_job(modo: str, placa: str, d_ini: date, d_fim: date):
     textos: list[str] = []
     pdf_writer = PdfWriter()
     total_pontos = 0
-    N_WORKERS = DEFAULT_WORKERS  # 2
+    N_WORKERS = DEFAULT_WORKERS  # 1
 
     try:
         with TempWorkspace(prefix="sitrax_frota_") as tmp:
-            # 1) Empresta os 2 JÁ (sem ociosidade do C2 na listagem)
             borrowed = warm_pool.borrow_for_fleet()
-            _JOB["message"] = "Frota: listando placas e iniciando 2 Chromes…"
+            _JOB["message"] = "Frota: listando placas (1 Chrome estável)…"
 
-            # 2) Lista rápido no C1 (C2 já está “frota”, pronto para barreira)
             bot0 = borrowed[0][1] if borrowed else None
             if bot0 is None:
                 raise RuntimeError("Nenhum Chrome permanente disponível para frota.")
@@ -220,25 +213,15 @@ def _run_job(modo: str, placa: str, d_ini: date, d_fim: date):
                     "Tente 1 placa ou use o upload de PDF."
                 )
 
-            w_preview = [[] for _ in range(N_WORKERS)]
-            for i, v in enumerate(vehicles):
-                w_preview[i % N_WORKERS].append(v["placa"])
             debug_session.step(
                 "frota_lista",
-                f"Frota: {len(vehicles)} veículo(s) — {N_WORKERS} Chromes "
-                f"PERMANENTES (partida simultânea). "
-                + " | ".join(
-                    f"C{i+1}: {', '.join(w_preview[i][:8])}"
-                    + ("…" if len(w_preview[i]) > 8 else "")
-                    for i in range(N_WORKERS)
-                    if w_preview[i]
-                ),
+                f"Frota: {len(vehicles)} veículo(s) — 1 Chrome permanente "
+                f"(sequencial, X entre placas, reinicia só se travar): "
+                + ", ".join(v["placa"] for v in vehicles[:25]),
                 ok=True,
                 screenshot=False,
             )
-            _JOB["message"] = (
-                f"Frota: 0/{len(vehicles)} — 2 Chromes em paralelo (já)…"
-            )
+            _JOB["message"] = f"Frota: 0/{len(vehicles)} — 1 Chrome estável…"
 
             def _msg(m: str) -> None:
                 _JOB["message"] = m

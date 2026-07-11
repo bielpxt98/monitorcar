@@ -1,9 +1,9 @@
 """
 Pool de Chromes permanentes no Sitrax.
 
-- Sempre 2 navegadores logados, parados em Posições/Veículos.
-- 1 placa: usa um dos dois (livre) e devolve a Veículos.
-- Todos (frota): empresta os 2 em paralelo; no fim ambos voltam a aguardar.
+- 1 navegador logado, parado em Posições/Veículos (estável no Railway).
+- 1 placa e Todos: mesmo Chrome; entre placas X → próxima.
+- Só reabre se a aba travar (tab crashed).
 """
 
 from __future__ import annotations
@@ -19,7 +19,8 @@ from typing import Any, Optional
 
 logger = logging.getLogger(__name__)
 
-PERMANENT_SLOTS = 2
+# 1 Chrome = menos tab crashed e menos placas perdidas (pontos completos)
+PERMANENT_SLOTS = 1
 _LOGIN_LOCK = threading.Lock()
 
 
@@ -135,16 +136,13 @@ class WarmPool:
     # ——— lifecycle ———
 
     def start(self, headless: bool = True, low_memory: bool = True) -> dict:
-        """Garante os 2 Chromes permanentes prontos e liga o keep-alive."""
+        """Garante o(s) Chrome(s) permanente(s) e liga o keep-alive."""
         snap = self.ensure_both(headless=headless, low_memory=low_memory)
         self.start_keeper()
         return snap
 
     def start_keeper(self, interval_sec: float = 45.0) -> None:
-        """
-        Thread em background: se algum Chrome cair (e não estiver em frota),
-        religa sozinho — sem botão manual.
-        """
+        """Religa sozinho se o Chrome cair (fora da frota)."""
         if self._keeper_thread and self._keeper_thread.is_alive():
             return
 
@@ -152,7 +150,6 @@ class WarmPool:
 
         def _loop() -> None:
             logger.info("WarmPool keeper ligado (intervalo %.0fs)", interval_sec)
-            # 1ª passagem já no começo (além do start)
             while not self._keeper_stop.wait(interval_sec):
                 if self._fleet_busy:
                     continue
@@ -162,9 +159,8 @@ class WarmPool:
                     total = int(snap.get("slot_count") or PERMANENT_SLOTS)
                     if ready >= total:
                         continue
-                    # algum slot morto/erro/off/stuck → reaquece
                     logger.info(
-                        "Keeper: %s/%s prontos — reaquecendo pool…", ready, total
+                        "Keeper: %s/%s prontos — reaquecendo…", ready, total
                     )
                     self.ensure_both(headless=True, low_memory=True)
                 except Exception as e:
@@ -179,37 +175,15 @@ class WarmPool:
         self._keeper_stop.set()
 
     def ensure_both(self, headless: bool = True, low_memory: bool = True) -> dict:
-        """
-        Sobe os 2 em sequência (Chrome 1 → espera → Chrome 2).
-        Se o 2 falhar/travar, tenta mais 1 vez.
-        """
-        # 1º Chrome
-        try:
-            self._ensure_slot(0, headless=headless, low_memory=low_memory)
-        except Exception as e:
-            logger.exception("Falha ao aquecer slot 1: %s", e)
-            self.last_error = str(e)
-
-        # pequena folga de RAM/sessão antes do 2º
-        time.sleep(4.0)
-
-        # 2º Chrome (até 2 tentativas)
-        for attempt in range(2):
+        """Garante todos os slots permanentes (hoje: 1)."""
+        for i in range(len(self._slots)):
             try:
-                self._ensure_slot(1, headless=headless, low_memory=low_memory)
-                if self._slots[1].alive() and self._slots[1].status == "ready":
-                    break
+                self._ensure_slot(i, headless=headless, low_memory=low_memory)
             except Exception as e:
-                logger.exception(
-                    "Falha ao aquecer slot 2 (tentativa %s): %s", attempt + 1, e
-                )
+                logger.exception("Falha ao aquecer slot %s: %s", i + 1, e)
                 self.last_error = str(e)
-                with self._slots[1].lock:
-                    self._close_slot_unlocked(self._slots[1], keep_status=True)
-                    self._slots[1].status = "error"
-                    self._slots[1].message = f"Chrome 2: falha — {e}"
-                if attempt == 0:
-                    time.sleep(5.0)
+                if i + 1 < len(self._slots):
+                    time.sleep(3.0)
 
         if not self.started_at and any(s.alive() for s in self._slots):
             self.started_at = datetime.now().strftime("%d/%m/%Y %H:%M:%S")

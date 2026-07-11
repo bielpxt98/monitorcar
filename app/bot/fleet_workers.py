@@ -1,15 +1,10 @@
 """
-Frota com 2 Chromes (permanentes do WarmPool) e divisão round-robin.
+Frota com 1 Chrome permanente (estável / menos perda de pontos).
 
-Placas 1-indexadas:
-  Worker 1 → 1, 3, 5, 7, 9...
-  Worker 2 → 2, 4, 6, 8, 10...
-
-Preferência: reutilizar bots já logados em Veículos (keep_alive=True).
-
-IMPORTANTE: NÃO reinicia o Chrome a cada N placas.
-Só reabre browser se a sessão morrer (tab crashed / invalid session).
-Entre placas: X no chip → próxima placa no MESMO Chrome.
+- Todas as placas em sequência no mesmo browser.
+- Entre placas: X no chip → próxima (sem login).
+- Só reabre se tab crashed / sessão morta.
+- Placas que falharam por crash são re-tentadas no fim.
 """
 
 from __future__ import annotations
@@ -24,8 +19,8 @@ from typing import Any, Optional
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_WORKERS = 2
-# Legado: havia RESTART_EVERY=3 — removido. Só crash reinicia o browser.
+# 1 worker = sem briga de RAM; total de pontos mais completo
+DEFAULT_WORKERS = 1
 RESTART_ONLY_ON_CRASH = True
 
 
@@ -433,7 +428,7 @@ def run_fleet_parallel(
     """
     from app.bot import debug_session
 
-    n_workers = max(1, min(int(n_workers), 2))  # frota = 2
+    n_workers = max(1, min(int(n_workers), 1))  # frota estável = 1 Chrome
     buckets = partition_round_robin(vehicles, n_workers)
 
     bot_by_id: dict[int, Any] = {}
@@ -526,4 +521,62 @@ def run_fleet_parallel(
         _tick()
 
     all_results.sort(key=lambda r: r.order)
+
+    # Reprocessa placas que falharam por crash/erro (não vazio legítimo 0 pts)
+    failed = [
+        r
+        for r in all_results
+        if (not r.ok) and r.pontos == 0 and "erro" in (r.texto or "").lower()
+    ]
+    # também: ok=False com error preenchido
+    failed_orders = {r.order for r in all_results if not r.ok and r.error and "0 posições" not in (r.error or "")}
+    retry_vehicles = [
+        (i, v)
+        for i, v in enumerate(vehicles)
+        if i in failed_orders
+        or any(
+            r.order == i and not r.ok and r.pontos == 0 and r.error
+            for r in all_results
+        )
+    ]
+    # dedupe
+    seen_o = set()
+    retry_list: list[tuple[int, dict]] = []
+    for item in retry_vehicles:
+        if item[0] not in seen_o:
+            seen_o.add(item[0])
+            retry_list.append(item)
+
+    if retry_list and existing_bots:
+        debug_session.step(
+            "frota_retry_falhas",
+            f"Reprocessando {len(retry_list)} placa(s) que falharam: "
+            + ", ".join(v["placa"] for _, v in retry_list[:15]),
+            ok=True,
+            screenshot=False,
+        )
+        # 1 worker com o bot 0 (ou cold)
+        bot0 = bot_by_id.get(0) or (existing_bots[0][1] if existing_bots else None)
+        retry_results = _run_one_worker(
+            0,
+            retry_list,
+            data_ini,
+            data_fim,
+            data_ref,
+            download_dir,
+            progress,
+            progress_lock,
+            bot0,
+            keep_alive,
+            on_bot_replaced,
+            None,  # sem barreira
+        )
+        by_order = {r.order: r for r in all_results}
+        for r in retry_results:
+            # só substitui se o retry foi melhor (mais pontos ou ok)
+            old = by_order.get(r.order)
+            if old is None or (r.ok and (not old.ok or r.pontos >= old.pontos)):
+                by_order[r.order] = r
+        all_results = sorted(by_order.values(), key=lambda x: x.order)
+
     return all_results
