@@ -50,6 +50,7 @@ _IGNITION_ON_RE = re.compile(
     r"(?<![a-z])normal(?![a-z])",
     re.I,
 )
+# Mode EN do Sitrax na frota: "Parked" / "In Motion" / "Normal"
 
 
 def parse_dt(value: str) -> Optional[datetime]:

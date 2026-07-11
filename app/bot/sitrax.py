@@ -1931,50 +1931,61 @@ class SitraxBot:
         self._sleep(1.5)
 
     def scrape_positions_table(self) -> list[dict]:
-        """Lê a grade de posições (EN/PT). Prefere extrair via JS (mais linhas)."""
+        """
+        Lê a grade de posições (EN/PT).
+
+        Sitrax/DataTables costuma separar:
+          - tabela do thead (scrollHead)
+          - tabela do tbody (scrollBody)
+        O scrape antigo pegava a tabela com mais tr SEM o thead → colunas
+        viravam ícones vazios e o robô gravava 0 pts com a tela CHEIA de dados.
+        """
         d = self._d()
-        self._sleep(0.8)
-        # rola o corpo da tabela (DataTables / scroll interno)
+        self._sleep(0.6)
+        # rola o corpo da tabela (DataTables / scroll interno) várias vezes
         try:
-            d.execute_script(
-                """
-                var boxes = document.querySelectorAll(
-                  '.dataTables_scrollBody, .ui-datatable-scrollable-body, ' +
-                  '.table-responsive, [class*="scroll"]'
-                );
-                for (var i = 0; i < boxes.length; i++) {
-                  try { boxes[i].scrollTop = boxes[i].scrollHeight; } catch(e) {}
-                }
-                window.scrollBy(0, 800);
-                """
-            )
-            self._sleep(0.5)
+            for _ in range(4):
+                d.execute_script(
+                    """
+                    var boxes = document.querySelectorAll(
+                      '.dataTables_scrollBody, .ui-datatable-scrollable-body, ' +
+                      '.table-responsive, [class*="scroll"], .dataTables_wrapper'
+                    );
+                    for (var i = 0; i < boxes.length; i++) {
+                      try { boxes[i].scrollTop = boxes[i].scrollHeight; } catch(e) {}
+                    }
+                    window.scrollBy(0, 600);
+                    """
+                )
+                self._sleep(0.25)
         except Exception:
             pass
 
-        # Extração em massa via JS (rápido e pega o que está no DOM)
         try:
             raw_rows = d.execute_script(
                 """
                 function txt(el) {
+                  if (!el) return '';
                   return (el.innerText || el.textContent || '').replace(/\\s+/g,' ').trim();
                 }
-                var tables = Array.prototype.slice.call(document.querySelectorAll('table'));
-                if (!tables.length) return [];
-                tables.sort(function(a,b) {
-                  return b.querySelectorAll('tbody tr').length - a.querySelectorAll('tbody tr').length;
-                });
-                var table = tables[0];
+                var DATE_RE = /\\d{2}\\/\\d{2}\\/\\d{4}\\s+\\d{2}:\\d{2}(:\\d{2})?/;
+                var MODE_RE = /parked|estacionado|normal|in\\s*motion|em\\s*movimento|movimento|igni|alerta/i;
+
+                // ---- headers: junta thead de TODAS as tabelas (scrollHead) ----
                 var headers = [];
-                table.querySelectorAll('thead th').forEach(function(th) {
-                  headers.push(txt(th));
+                document.querySelectorAll('table thead th, .dataTables_scrollHead th').forEach(function(th) {
+                  var t = txt(th);
+                  if (t) headers.push(t);
                 });
+                // se ainda vazio, tenta primeira linha de th em qualquer table
                 if (!headers.length) {
-                  var first = table.querySelector('tr');
-                  if (first) first.querySelectorAll('th,td').forEach(function(c) {
-                    headers.push(txt(c));
+                  var ths = document.querySelectorAll('table tr th');
+                  ths.forEach(function(th) {
+                    var t = txt(th);
+                    if (t) headers.push(t);
                   });
                 }
+
                 function findCol(names) {
                   for (var i = 0; i < headers.length; i++) {
                     var hl = (headers[i] || '').toLowerCase();
@@ -1987,99 +1998,158 @@ class SitraxBot:
                 var iGps = findCol(['GPS Date','Data GPS','GPS']);
                 var iSis = findCol(['Date System','System Date','Data Sistema','Sistema']);
                 var iModo = findCol(['Mode','Modo','Status']);
-                var iEnd = findCol(['Address','Location','Endereço','Endereco']);
+                var iEnd = findCol(['Address','Location','Endereço','Endereco','Event']);
                 var iRef = findCol(['Reference','Referência','Referencia']);
                 var iTemp = findCol(['Temperature','Temperatura']);
+
+                // ---- linhas: preferir scrollBody; senão todas as tr com td ----
+                var trs = [];
+                var bodyBoxes = document.querySelectorAll(
+                  '.dataTables_scrollBody tbody tr, .ui-datatable-scrollable-body tbody tr'
+                );
+                if (bodyBoxes && bodyBoxes.length) {
+                  trs = Array.prototype.slice.call(bodyBoxes);
+                } else {
+                  document.querySelectorAll('table tbody tr, table tr').forEach(function(tr) {
+                    if (tr.querySelectorAll('td').length >= 2) trs.push(tr);
+                  });
+                }
+
                 var out = [];
-                var trs = table.querySelectorAll('tbody tr');
+                var seen = {};
                 for (var r = 0; r < trs.length; r++) {
                   var cells = trs[r].querySelectorAll('td');
                   if (!cells.length) continue;
                   var texts = [];
                   for (var c = 0; c < cells.length; c++) texts.push(txt(cells[c]));
+
                   function cell(idx) {
                     if (idx < 0 || idx >= texts.length) return '';
                     return texts[idx];
                   }
-                  var item = {
-                    data_gps: cell(iGps) || texts[0] || '',
-                    data_sistema: cell(iSis) || texts[1] || '',
-                    modo: cell(iModo),
-                    endereco: cell(iEnd),
-                    referencia: cell(iRef),
-                    temperatura: cell(iTemp),
-                    raw_cells: texts
-                  };
-                  // heurísticas se colunas vazias
-                  if (!item.modo) {
+
+                  var dates = [];
+                  for (var d = 0; d < texts.length; d++) {
+                    if (DATE_RE.test(texts[d])) dates.push(texts[d].match(DATE_RE)[0]);
+                  }
+                  var modo = cell(iModo);
+                  if (!modo) {
                     for (var k = 0; k < texts.length; k++) {
-                      if (/parked|estacionado|normal|in motion|movimento|igni/i.test(texts[k])) {
-                        item.modo = texts[k]; break;
+                      if (MODE_RE.test(texts[k]) && texts[k].length < 60) {
+                        modo = texts[k]; break;
                       }
                     }
                   }
-                  if (!/\\d{2}\\/\\d{2}\\/\\d{4}/.test(item.data_gps)) {
-                    for (var k2 = 0; k2 < texts.length; k2++) {
-                      if (/\\d{2}\\/\\d{2}\\/\\d{4}\\s+\\d{2}:\\d{2}/.test(texts[k2])) {
-                        item.data_gps = texts[k2]; break;
-                      }
-                    }
-                  }
-                  if (!item.endereco) {
+                  var data_gps = cell(iGps);
+                  if (!DATE_RE.test(data_gps) && dates.length) data_gps = dates[0];
+                  var data_sis = cell(iSis);
+                  if (!DATE_RE.test(data_sis) && dates.length > 1) data_sis = dates[1];
+
+                  var endereco = cell(iEnd);
+                  if (!endereco) {
                     for (var k3 = 0; k3 < texts.length; k3++) {
                       if (/\\([A-Z]{2}\\)/.test(texts[k3]) ||
-                          /rua|avenida|av\\.|rodovia|estrada|street|road/i.test(texts[k3])) {
-                        item.endereco = texts[k3]; break;
+                          /rua|avenida|av\\.|rodovia|estrada|street|road|city/i.test(texts[k3])) {
+                        endereco = texts[k3]; break;
                       }
                     }
                   }
-                  if (item.data_gps || item.endereco) out.push(item);
+
+                  if (!DATE_RE.test(data_gps) && !endereco) continue;
+                  var key = (data_gps || '') + '|' + (modo || '') + '|' + (endereco || '').slice(0,40);
+                  if (seen[key]) continue;
+                  seen[key] = 1;
+
+                  out.push({
+                    data_gps: data_gps || '',
+                    data_sistema: data_sis || '',
+                    modo: modo || '',
+                    endereco: endereco || '',
+                    referencia: cell(iRef) || '',
+                    temperatura: cell(iTemp) || '',
+                    raw_cells: texts
+                  });
+                }
+
+                // fallback nuclear: varre texto da página por datas + modo
+                if (!out.length) {
+                  var body = (document.body && document.body.innerText) || '';
+                  var lines = body.split(/\\n+/);
+                  var cur = null;
+                  for (var li = 0; li < lines.length; li++) {
+                    var line = lines[li].replace(/\\s+/g,' ').trim();
+                    if (!line) continue;
+                    var dm = line.match(DATE_RE);
+                    if (dm) {
+                      if (cur && cur.data_gps) out.push(cur);
+                      cur = {
+                        data_gps: dm[0],
+                        data_sistema: '',
+                        modo: '',
+                        endereco: '',
+                        referencia: '',
+                        temperatura: '',
+                        raw_cells: [line]
+                      };
+                      var dm2 = line.match(new RegExp(DATE_RE.source, 'g'));
+                      if (dm2 && dm2.length > 1) cur.data_sistema = dm2[1];
+                      if (MODE_RE.test(line)) {
+                        var mm = line.match(MODE_RE);
+                        if (mm) cur.modo = mm[0];
+                      }
+                    } else if (cur) {
+                      if (!cur.modo && MODE_RE.test(line) && line.length < 40) cur.modo = line;
+                      if (!cur.endereco && (/\\([A-Z]{2}\\)/.test(line) || /rua|street|avenida/i.test(line)))
+                        cur.endereco = line;
+                    }
+                  }
+                  if (cur && cur.data_gps) out.push(cur);
                 }
                 return out;
                 """
             )
             if raw_rows and isinstance(raw_rows, list):
                 logger.info("Posições lidas (JS): %s", len(raw_rows))
-                return raw_rows
+                if raw_rows:
+                    return raw_rows
         except Exception as e:
             logger.warning("Scrape JS falhou: %s", e)
 
-        # Fallback Selenium puro
-        tables = d.find_elements(By.CSS_SELECTOR, "table")
-        if not tables:
-            return []
-        table = max(
-            tables, key=lambda t: len(t.find_elements(By.CSS_SELECTOR, "tbody tr"))
-        )
-        headers = [th.text.strip() for th in table.find_elements(By.CSS_SELECTOR, "thead th")]
+        # Fallback Selenium: qualquer tr com data
         rows_data: list[dict] = []
-        for row in table.find_elements(By.CSS_SELECTOR, "tbody tr"):
-            cells = row.find_elements(By.TAG_NAME, "td")
-            if not cells:
-                continue
-            texts = [c.text.strip() for c in cells]
-            item = {
-                "data_gps": "",
-                "data_sistema": "",
-                "modo": "",
-                "endereco": "",
-                "referencia": "",
-                "temperatura": "",
-                "raw_cells": texts,
-            }
-            for t in texts:
-                if re.search(r"\d{2}/\d{2}/\d{4}\s+\d{2}:\d{2}", t) and not item["data_gps"]:
-                    item["data_gps"] = t
-                elif re.search(
-                    r"parked|estacionado|normal|in motion|movimento|igni", t, re.I
-                ):
-                    item["modo"] = t
-                elif re.search(r"\([A-Z]{2}\)", t) or re.search(
-                    r"rua|avenida|street", t, re.I
-                ):
-                    item["endereco"] = t
-            if item["data_gps"] or item["endereco"]:
-                rows_data.append(item)
+        try:
+            for row in d.find_elements(By.CSS_SELECTOR, "table tbody tr, table tr"):
+                cells = row.find_elements(By.TAG_NAME, "td")
+                if len(cells) < 2:
+                    continue
+                texts = [c.text.strip() for c in cells]
+                item = {
+                    "data_gps": "",
+                    "data_sistema": "",
+                    "modo": "",
+                    "endereco": "",
+                    "referencia": "",
+                    "temperatura": "",
+                    "raw_cells": texts,
+                }
+                for t in texts:
+                    if re.search(r"\d{2}/\d{2}/\d{4}\s+\d{2}:\d{2}", t):
+                        if not item["data_gps"]:
+                            item["data_gps"] = t
+                        elif not item["data_sistema"]:
+                            item["data_sistema"] = t
+                    elif re.search(
+                        r"parked|estacionado|normal|in motion|movimento|igni", t, re.I
+                    ):
+                        item["modo"] = t
+                    elif re.search(r"\([A-Z]{2}\)", t) or re.search(
+                        r"rua|avenida|street", t, re.I
+                    ):
+                        item["endereco"] = t
+                if item["data_gps"] or item["endereco"]:
+                    rows_data.append(item)
+        except Exception as e:
+            logger.warning("Scrape selenium: %s", e)
         logger.info("Posições lidas (selenium): %s", len(rows_data))
         return rows_data
 
@@ -2312,8 +2382,8 @@ class SitraxBot:
 
     def wait_positions_grid(self, timeout: float = 30) -> int:
         """
-        Espera a grade de posições (ou 'Mostrando: N Registro').
-        Retorna nº de linhas tbody encontradas (0 se vazio/timeout).
+        Espera a grade de posições (PT/EN).
+        Conta linhas com data GPS (não só tr vazios do DataTables).
         """
         d = self._d()
         end = time.time() + timeout
@@ -2323,30 +2393,36 @@ class SitraxBot:
                 n = d.execute_script(
                     """
                     var body = (document.body && document.body.innerText) || '';
-                    // "Mostrando: 104 Registro(s)" / "Showing: 104"
                     var m = body.match(/Mostrando\\s*:\\s*(\\d+)/i)
                          || body.match(/Showing\\s*:\\s*(\\d+)/i)
-                         || body.match(/(\\d+)\\s*Registro/i);
-                    if (m) return parseInt(m[1], 10);
-                    var tables = document.querySelectorAll('table');
-                    var best = 0;
-                    for (var i = 0; i < tables.length; i++) {
-                      var rows = tables[i].querySelectorAll('tbody tr');
-                      if (rows.length > best) best = rows.length;
+                         || body.match(/(\\d+)\\s*Registro/i)
+                         || body.match(/(\\d+)\\s*Record/i);
+                    if (m && parseInt(m[1], 10) > 0) return parseInt(m[1], 10);
+
+                    // conta linhas com data dd/mm/yyyy hh:mm (scrollBody ou qualquer table)
+                    var DATE_RE = /\\d{2}\\/\\d{2}\\/\\d{4}\\s+\\d{2}:\\d{2}/;
+                    var trs = document.querySelectorAll(
+                      '.dataTables_scrollBody tbody tr, table tbody tr, table tr'
+                    );
+                    var count = 0;
+                    for (var i = 0; i < trs.length; i++) {
+                      var t = (trs[i].innerText || trs[i].textContent || '');
+                      if (DATE_RE.test(t)) count++;
                     }
-                    return best;
+                    return count;
                     """
                 )
                 last_n = int(n or 0)
                 if last_n > 0:
                     return last_n
-                # 0 registros explícito após filter
                 if re.search(
-                    r"mostrando\s*:\s*0|showing\s*:\s*0|0\s*registro",
+                    r"mostrando\s*:\s*0|showing\s*:\s*0|0\s*registro|0\s*record",
                     (d.find_element(By.TAG_NAME, "body").text or ""),
                     re.I,
                 ):
-                    return 0
+                    # só aceita zero explícito depois de ~4s de espera
+                    if time.time() + timeout - end > 4:
+                        return 0
             except Exception:
                 pass
             self._sleep(0.45)
