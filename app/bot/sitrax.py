@@ -3475,10 +3475,23 @@ class SitraxBot:
                 # Filter da BARRA (laranja grande) — carrega a grade
                 try:
                     self.click_filtrar()
-                    self._wait_loader_gone(30)
-                    self._sleep(0.8)
+                    # Sitrax demora ~3s para atualizar registros após Filter (manual)
+                    n_regs = self.wait_after_filter(
+                        min_sec=3.2,
+                        timeout=28.0,
+                        data_ini=data_ini,
+                    )
+                    logger.info(
+                        "Após data+Filter barra: Showing=%s", n_regs
+                    )
+                    self._trace(
+                        "data_apos_filter_grade",
+                        f"Showing={n_regs} após período {ini_br}→{fim_br}",
+                        shot=True,
+                    )
                 except Exception as e:
                     logger.warning("Filter barra após data: %s", e)
+                    self._sleep(3.2)
                 return
 
             logger.warning(
@@ -4078,12 +4091,15 @@ class SitraxBot:
             except Exception as e:
                 logger.warning("re-select após data: %s", e)
 
-        # set_date_filter já clica Filter; reforço + espera grade
+        # set_date_filter já clica Filter + espera ~3s; reforço se grade ainda 0
         try:
-            self.click_filtrar()
+            n = self.count_sitrax_registers()
+            if n <= 0 and not self.sitrax_says_no_records():
+                self.click_filtrar()
+                self.wait_after_filter(min_sec=3.2, timeout=22.0, data_ini=data_ini)
         except Exception as e:
             logger.warning("click_filtrar após data (warm): %s", e)
-        self._sleep(0.6)
+            self._sleep(3.0)
         # última checagem de chip (evita chip_lento falso)
         self.wait_vehicle_chip(placa, timeout=4.0)
 
@@ -4266,6 +4282,70 @@ class SitraxBot:
         except Exception:
             return False
 
+    def wait_after_filter(
+        self,
+        min_sec: float = 3.0,
+        timeout: float = 25.0,
+        data_ini: Optional[date] = None,
+    ) -> int:
+        """
+        Após Filtrar no Sitrax a grade demora ~3s para atualizar (confirmado manual).
+        Espera o mínimo, depois estabiliza o contador Mostrando/Showing.
+        Retorna o N de registros (ou 0 se vazio confirmado).
+        """
+        t0 = time.time()
+        # mínimo absoluto — multi-dia demora mais
+        self._wait_loader_gone(20)
+        elapsed = time.time() - t0
+        if elapsed < min_sec:
+            self._sleep(min_sec - elapsed)
+            logger.info("Aguardou %.1fs pós-Filter (mínimo %.1fs)", min_sec, min_sec)
+
+        end = time.time() + max(8.0, timeout - min_sec)
+        last_n = -1
+        stable = 0
+        while time.time() < end:
+            if self.sitrax_says_no_records() or self.showing_zero_records():
+                n0 = self.count_sitrax_registers()
+                if n0 == 0:
+                    self._sleep(0.8)
+                    if self.count_sitrax_registers() == 0:
+                        return 0
+            n = self.count_sitrax_registers()
+            if n < 0:
+                n = 0 if self.grid_has_data_rows() else -1
+            # se pediu período multi-dia, espera o chip/linhas refletirem início
+            if data_ini and n and n > 0:
+                try:
+                    ini_br = data_ini.strftime("%d/%m/%Y")
+                    body = self._d().find_element(By.TAG_NAME, "body").text or ""
+                    # se a grade só mostra "hoje" e o início é outro dia, ainda carregando
+                    if ini_br not in body and data_ini != date.today():
+                        # ainda pode ser que a 1ª página não tenha o dia inicial
+                        pass
+                except Exception:
+                    pass
+            if n >= 0 and n == last_n and n > 0:
+                stable += 1
+                if stable >= 2:  # mesmo N em 2 leituras (~1s)
+                    logger.info(
+                        "Grade estável pós-Filter: %s registro(s) (%.1fs)",
+                        n,
+                        time.time() - t0,
+                    )
+                    return n
+            else:
+                stable = 0
+            last_n = n
+            self._sleep(0.5)
+        final = self.count_sitrax_registers()
+        logger.info(
+            "Pós-Filter timeout: Showing=%s (%.1fs)",
+            final,
+            time.time() - t0,
+        )
+        return final if final >= 0 else (last_n if last_n >= 0 else 0)
+
     def wait_positions_grid(self, timeout: float = 30) -> int:
         """
         Espera a grade de posições (PT/EN).
@@ -4273,16 +4353,20 @@ class SitraxBot:
         Retorna 0 cedo se o Sitrax declarar explicitamente sem registros.
         """
         d = self._d()
+        # Sitrax demora ~3s após Filter — não retorna no 1º tick
+        self._sleep(min(3.0, max(0.5, timeout * 0.15)))
         end = time.time() + timeout
         last_n = 0
         empty_confirmed_since: Optional[float] = None
+        stable = 0
+        prev_n = -1
         while time.time() < end:
             try:
                 if self.sitrax_says_no_records():
                     if empty_confirmed_since is None:
                         empty_confirmed_since = time.time()
-                    # confirma 0 real após ~1.2s (toast + "Mostrando: 0")
-                    if time.time() - empty_confirmed_since >= 1.2:
+                    # confirma 0 real após ~1.5s (toast + "Mostrando: 0")
+                    if time.time() - empty_confirmed_since >= 1.5:
                         return 0
                 else:
                     empty_confirmed_since = None
@@ -4294,7 +4378,7 @@ class SitraxBot:
                          || body.match(/Showing\\s*:\\s*(\\d+)/i)
                          || body.match(/(\\d+)\\s*Registro/i)
                          || body.match(/(\\d+)\\s*Record/i);
-                    if (m && parseInt(m[1], 10) > 0) return parseInt(m[1], 10);
+                    if (m && parseInt(m[1], 10) >= 0) return parseInt(m[1], 10);
 
                     var DATE_RE = /\\d{2}\\/\\d{2}\\/\\d{4}\\s+\\d{2}:\\d{2}/;
                     var trs = document.querySelectorAll(
@@ -4310,10 +4394,17 @@ class SitraxBot:
                 )
                 last_n = int(n or 0)
                 if last_n > 0:
-                    return last_n
+                    # estabiliza: mesmo contador 2 vezes (evita ler no meio do AJAX)
+                    if last_n == prev_n:
+                        stable += 1
+                        if stable >= 2:
+                            return last_n
+                    else:
+                        stable = 0
+                    prev_n = last_n
             except Exception:
                 pass
-            self._sleep(0.45)
+            self._sleep(0.5)
         return last_n
 
     def fetch_positions_for_fleet_plate(
@@ -4398,7 +4489,14 @@ class SitraxBot:
             except Exception as e:
                 logger.warning("re-Filter %s: %s", placa_u, e)
 
-            n_hint = self.wait_positions_grid(timeout=28)
+            # ~3s+ até a grade atualizar (multi-dia demora mais)
+            n_hint = self.wait_after_filter(
+                min_sec=3.2,
+                timeout=30.0,
+                data_ini=data_ini,
+            )
+            if n_hint <= 0:
+                n_hint = self.wait_positions_grid(timeout=20)
             # se ainda 0 e SEM mensagem de vazio: Filter de novo e espera mais
             if n_hint == 0 and not (
                 self.sitrax_says_no_records() or self.showing_zero_records()
@@ -4407,7 +4505,9 @@ class SitraxBot:
                     self.click_filtrar()
                 except Exception:
                     pass
-                n_hint = self.wait_positions_grid(timeout=20)
+                n_hint = self.wait_after_filter(
+                    min_sec=3.0, timeout=22.0, data_ini=data_ini
+                )
 
             self.try_scroll_all()
             rows = self.scrape_positions_table()
