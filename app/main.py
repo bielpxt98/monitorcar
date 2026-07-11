@@ -167,14 +167,13 @@ def _run_job(modo: str, placa: str, d_ini: date, d_fim: date):
             headless=True,
         )
 
-    # ——— TODOS: frota 1 a 1; Chrome reinicia a cada N placas (evita tab crashed) ———
+    # ——— TODOS: 3 Chromes em paralelo (round-robin) ———
     from app.bot.summary_pdf import build_summary_pdf_bytes, safe_filename
-    from app.bot.report import build_narrative_report
+    from app.bot.fleet_workers import run_fleet_parallel, DEFAULT_WORKERS
     from pypdf import PdfWriter, PdfReader
     import io
-    import gc
 
-    # Libera RAM: fecha sessão permanente antes da frota (Chrome extra)
+    # Libera RAM: fecha sessão permanente (1 Chrome) antes dos 3 da frota
     try:
         from app.bot.warm_pool import warm_pool
 
@@ -186,186 +185,101 @@ def _run_job(modo: str, placa: str, d_ini: date, d_fim: date):
     textos: list[str] = []
     pdf_writer = PdfWriter()
     total_pontos = 0
-    # a cada quantas placas reabre o Chrome (RAM Railway)
-    RESTART_EVERY = 3
-
-    def _is_crash(err: BaseException) -> bool:
-        s = str(err).lower()
-        return any(
-            x in s
-            for x in (
-                "tab crashed",
-                "session deleted",
-                "invalid session",
-                "disconnected",
-                "chrome not reachable",
-                "no such window",
-                "target window already closed",
-            )
-        )
+    N_WORKERS = DEFAULT_WORKERS  # 3 navegadores
 
     try:
         with TempWorkspace(prefix="sitrax_frota_") as tmp:
-            bot: Optional[SitraxBot] = None
-
-            def _new_bot() -> SitraxBot:
-                b = SitraxBot(
-                    headless=True,
-                    download_dir=tmp,
-                    quiet=True,
-                    low_memory=True,
-                )
-                b.start()
-                b.login()
-                return b
-
-            def _kill_bot() -> None:
-                nonlocal bot
-                if bot is not None:
-                    try:
-                        bot.close()
-                    except Exception:
-                        pass
-                    bot = None
-                gc.collect()
-
+            # 1 Chrome só para listar a frota (depois fecha)
+            lister = SitraxBot(
+                headless=True,
+                download_dir=tmp / "list",
+                quiet=True,
+                low_memory=True,
+            )
+            vehicles: list = []
             try:
-                bot = _new_bot()
-                bot.open_posicoes()
-                bot.open_vehicle_selector()
-                bot.load_vehicle_list()
-                vehicles = bot.list_plates()
+                lister.start()
+                lister.login()
+                lister.open_posicoes()
+                lister.open_vehicle_selector()
+                lister.load_vehicle_list()
+                vehicles = lister.list_plates()
+            finally:
                 try:
-                    bot._d().execute_script(
-                        "if (typeof hideModalSearchVeiculo === 'function') "
-                        "hideModalSearchVeiculo();"
-                    )
+                    lister.close()
                 except Exception:
                     pass
 
-                if not vehicles:
-                    debug_session.step(
-                        "frota_vazia",
-                        "Nenhum veículo listado no modal",
-                        ok=False,
-                        screenshot=False,
-                    )
-                    raise RuntimeError(
-                        "Não achei a lista de veículos da frota. "
-                        "Tente 1 placa ou use o upload de PDF."
-                    )
-
-                vehicles = [
-                    v
-                    for v in vehicles
-                    if v.get("placa")
-                    and v["placa"].upper() not in ("TODOS", "TODAS", "ALL", "FROTA")
-                ]
-                # Últimas placas primeiro — eram as que mais falhavam (fim da lista/DOM)
-                vehicles = list(reversed(vehicles))
+            vehicles = [
+                v
+                for v in vehicles
+                if v.get("placa")
+                and v["placa"].upper() not in ("TODOS", "TODAS", "ALL", "FROTA")
+            ]
+            # ordem natural da lista Sitrax (posição 1,2,3… para o round-robin)
+            if not vehicles:
                 debug_session.step(
-                    "frota_lista",
-                    f"Frota: {len(vehicles)} veículo(s) — 1 a 1, "
-                    f"ÚLTIMAS primeiro "
-                    f"(reinicia Chrome a cada {RESTART_EVERY}): "
-                    + ", ".join(v["placa"] for v in vehicles[:25]),
-                    ok=True,
+                    "frota_vazia",
+                    "Nenhum veículo listado no modal",
+                    ok=False,
                     screenshot=False,
                 )
-                _JOB["message"] = f"Frota: 0/{len(vehicles)}"
+                raise RuntimeError(
+                    "Não achei a lista de veículos da frota. "
+                    "Tente 1 placa ou use o upload de PDF."
+                )
 
-                for i, v in enumerate(vehicles):
-                    pl = v["placa"]
-                    _JOB["message"] = f"Processando {i+1}/{len(vehicles)}: {pl}"
-                    debug_session.step(
-                        f"frota_{i+1}_de_{len(vehicles)}_{pl}",
-                        f"1 a 1 → ({i+1}/{len(vehicles)}) {pl} "
-                        "(Filter → scrape tabela → resumo)",
-                        ok=True,
-                        screenshot=False,
-                    )
+            # preview da divisão: W1=1,4,7… W2=2,5,8… W3=3,6,9…
+            w_preview = [[] for _ in range(N_WORKERS)]
+            for i, v in enumerate(vehicles):
+                w_preview[i % N_WORKERS].append(v["placa"])
+            debug_session.step(
+                "frota_lista",
+                f"Frota: {len(vehicles)} veículo(s) — {N_WORKERS} Chromes round-robin. "
+                + " | ".join(
+                    f"C{i+1}: {', '.join(w_preview[i][:8])}"
+                    + ("…" if len(w_preview[i]) > 8 else "")
+                    for i in range(N_WORKERS)
+                    if w_preview[i]
+                ),
+                ok=True,
+                screenshot=False,
+            )
+            _JOB["message"] = (
+                f"Frota: 0/{len(vehicles)} — subindo {N_WORKERS} Chromes…"
+            )
 
-                    # reinicia Chrome periodicamente (memória)
-                    if i > 0 and i % RESTART_EVERY == 0:
-                        debug_session.step(
-                            "frota_restart_chrome",
-                            f"Reiniciando Chrome após {i} veículos (anti tab-crash)",
-                            ok=True,
-                            screenshot=False,
-                        )
-                        _kill_bot()
-                        bot = _new_bot()
+            def _msg(m: str) -> None:
+                _JOB["message"] = m
 
-                    if bot is None or not bot.alive():
-                        _kill_bot()
-                        bot = _new_bot()
+            plate_results = run_fleet_parallel(
+                vehicles=vehicles,
+                data_ini=d_ini,
+                data_fim=d_fim,
+                data_ref=data_ref,
+                download_dir=tmp,
+                n_workers=N_WORKERS,
+                job_message_cb=_msg,
+            )
 
-                    attempts = 0
-                    while attempts < 2:
-                        attempts += 1
-                        try:
-                            # Frota: prioriza SCRAPE (menos RAM que baixar PDF 700+ pts)
-                            positions = bot.get_positions_for_plate(
-                                pl, data_ini=d_ini, data_fim=d_fim
-                            )
-                            n_pts = len([p for p in positions if p.when])
-                            debug_session.step(
-                                f"frota_ok_{pl}",
-                                f"{pl}: {n_pts} ponto(s) via tabela",
-                                ok=True,
-                                screenshot=False,
-                            )
-                            total_pontos += n_pts
-                            textos.append(
-                                build_narrative_report(
-                                    pl,
-                                    positions,
-                                    data_ref=data_ref,
-                                    cliente=v.get("cliente", ""),
-                                )
-                            )
-                            one = build_summary_pdf_bytes(
-                                pl,
-                                positions,
-                                data_ref=data_ref,
-                                cliente=v.get("cliente", ""),
-                            )
-                            reader = PdfReader(io.BytesIO(one))
-                            for page in reader.pages:
-                                pdf_writer.add_page(page)
-                            break
-                        except Exception as e:
-                            logger.exception("Falha em %s (tentativa %s)", pl, attempts)
-                            if _is_crash(e) and attempts < 2:
-                                debug_session.step(
-                                    f"frota_crash_{pl}",
-                                    f"Chrome caiu em {pl}; reiniciando e tentando de novo",
-                                    ok=False,
-                                    screenshot=False,
-                                )
-                                _kill_bot()
-                                bot = _new_bot()
-                                continue
-                            textos.append(f"📋 {pl}: erro — {e}")
-                            debug_session.step(
-                                f"frota_erro_{pl}",
-                                str(e),
-                                ok=False,
-                                screenshot=False,
-                            )
-                            if _is_crash(e):
-                                _kill_bot()
-                                bot = _new_bot()
-                            break
-            finally:
-                _kill_bot()
-                # Reaquece sessão permanente para testes de 1 placa
-                try:
-                    from app.bot.warm_pool import warm_pool
+            for r in plate_results:
+                total_pontos += r.pontos
+                textos.append(r.texto)
+                if r.pdf_bytes:
+                    try:
+                        reader = PdfReader(io.BytesIO(r.pdf_bytes))
+                        for page in reader.pages:
+                            pdf_writer.add_page(page)
+                    except Exception as e:
+                        logger.warning("PDF %s: %s", r.placa, e)
 
-                    warm_pool.start(headless=True, low_memory=True)
-                except Exception as e:
-                    logger.warning("Reaquecer WarmPool após frota: %s", e)
+            # Reaquece 1 Chrome permanente para testes de placa única
+            try:
+                from app.bot.warm_pool import warm_pool
+
+                warm_pool.start(headless=True, low_memory=True)
+            except Exception as e:
+                logger.warning("Reaquecer WarmPool após frota: %s", e)
 
         out = io.BytesIO()
         if len(pdf_writer.pages) == 0:

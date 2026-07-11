@@ -2133,18 +2133,101 @@ class SitraxBot:
         except Exception:
             return False
 
+    def clear_vehicle_chip(self) -> bool:
+        """
+        Clica no X do chip 'Veículo: PLACA' na barra de filtros
+        (limpa o veículo atual sem sair de Posições).
+        """
+        d = self._d()
+        self._close_date_popup_if_open()
+        try:
+            clicked = d.execute_script(
+                """
+                function visible(el) {
+                  var r = el.getBoundingClientRect();
+                  return r.width > 1 && r.height > 1;
+                }
+                // 1) botão/ícone X dentro do chip Veículo/Vehicle
+                var chips = document.querySelectorAll('div,span,button,a,li,label');
+                for (var i = 0; i < chips.length; i++) {
+                  var el = chips[i];
+                  if (!visible(el)) continue;
+                  var t = (el.innerText || el.textContent || '').replace(/\\s+/g,' ').trim();
+                  if (!t || t.length > 80) continue;
+                  var isVeic =
+                    /^Ve[ií]culo\\s*:/i.test(t) ||
+                    /^Vehicle\\s*:/i.test(t) ||
+                    (/Ve[ií]culo|Vehicle/i.test(t) && /[A-Z]{3}\\d/i.test(t));
+                  if (!isVeic) continue;
+                  var close = el.querySelector(
+                    'i.fa-xmark, i.fa-times, i.fa-close, button, a, [class*="close"], [class*="Clear"], [onclick*="clear"], [onclick*="Clear"], [onclick*="remove"]'
+                  );
+                  if (!close) {
+                    // irmãos / filhos com X
+                    var kids = el.querySelectorAll('i,button,a,span');
+                    for (var k = 0; k < kids.length; k++) {
+                      var c = kids[k];
+                      var cls = (c.className || '') + '';
+                      var oc = c.getAttribute('onclick') || '';
+                      var tx = (c.innerText || c.textContent || '').trim();
+                      if (/fa-x|times|close|clear|remove/i.test(cls + ' ' + oc) || tx === '×' || tx === 'x' || tx === 'X') {
+                        close = c; break;
+                      }
+                    }
+                  }
+                  if (close && visible(close)) {
+                    close.click();
+                    return 'chip-x';
+                  }
+                  // chip inteiro às vezes tem o X como irmão
+                  var sib = el.nextElementSibling;
+                  if (sib && visible(sib)) {
+                    var scls = (sib.className || '') + (sib.getAttribute('onclick') || '');
+                    if (/close|clear|times|xmark|remove/i.test(scls)) {
+                      sib.click();
+                      return 'chip-sibling-x';
+                    }
+                  }
+                }
+                // 2) qualquer X roxo/branco perto de texto de placa no filtro
+                var icons = document.querySelectorAll('i.fa-xmark, i.fa-times, i.fa-close, a.swTopBarIconCloseLight');
+                for (var j = 0; j < icons.length; j++) {
+                  var ic = icons[j];
+                  if (!visible(ic)) continue;
+                  var parent = ic.closest('div,span,button,a,li') || ic.parentElement;
+                  var pt = ((parent && (parent.innerText || parent.textContent)) || '');
+                  if (/Ve[ií]culo|Vehicle|placa|plate/i.test(pt) || /[A-Z]{3}\\d[A-Z0-9]\\d{2}/i.test(pt)) {
+                    ic.click();
+                    return 'icon-near-plate';
+                  }
+                }
+                return null;
+                """
+            )
+            if clicked:
+                logger.info("Limpou chip Veículo (%s)", clicked)
+                self._wait_loader_gone(20)
+                self._sleep(0.5)
+                return True
+        except Exception as e:
+            logger.warning("clear_vehicle_chip JS: %s", e)
+        return False
+
     def prepare_historico_warm(
         self,
         placa: str,
         data_ini: Optional[date] = None,
         data_fim: Optional[date] = None,
+        clear_previous: bool = False,
     ) -> None:
         """
         Caminho rápido (sessão já logada):
-          modal Veículos (ou reabre) → filtra placa → Selecionar → data → Filter.
-        Não faz login de novo.
+          [X do chip] → modal Veículos → filtra placa → Selecionar → data → Filter.
         """
         self._close_date_popup_if_open()
+        if clear_previous:
+            self.clear_vehicle_chip()
+            self._sleep(0.3)
         # Se modal já aberto (warm idle), usa; senão garante Posições + Veículo
         if not self._vehicle_modal_open():
             if not self._on_posicoes_screen():
@@ -2162,6 +2245,31 @@ class SitraxBot:
         self.set_date_filter(data_ini, data_fim)
         self.click_filtrar()
         self._sleep(1.2)
+
+    def prepare_next_fleet_plate(
+        self,
+        placa: str,
+        data_ini: Optional[date] = None,
+        data_fim: Optional[date] = None,
+        first: bool = False,
+    ) -> None:
+        """
+        Entre carros na frota (mesmo Chrome):
+          1º: Posições + Veículo normal
+          2º+: X no chip do veículo → lupa/modal → outra placa → Filter
+        """
+        if first:
+            if not self._on_posicoes_screen():
+                self.open_posicoes()
+                self._sleep(0.5)
+            self.prepare_historico_warm(
+                placa, data_ini, data_fim, clear_previous=False
+            )
+        else:
+            # limpa chip e escolhe o próximo sem voltar ao login
+            self.prepare_historico_warm(
+                placa, data_ini, data_fim, clear_previous=True
+            )
 
     def return_to_vehicles_ready(self) -> None:
         """

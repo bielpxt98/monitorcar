@@ -208,9 +208,10 @@
         </div>
         <button type="submit" class="btn-primary" id="btn-auto">Gerar resumo automático</button>
         <p class="hint">
-          No Sitrax <strong>não dá para marcar todos de uma vez</strong> — o robô faz <strong>1 por 1</strong>:<br/>
-          Filter → lê a tabela → resumo → próximo carro (Chrome reinicia a cada 3 placas).<br/>
-          <strong>Todos</strong> roda em <strong>segundo plano</strong> (evita erro “upstream”). Acompanhe em /debug e baixe o PDF quando terminar.
+          <strong>Todos</strong> sobe <strong>3 Chromes</strong> em paralelo (round-robin):<br/>
+          Chrome&nbsp;1 → placas 1, 4, 7, 10… · Chrome&nbsp;2 → 2, 5, 8, 11… · Chrome&nbsp;3 → 3, 6, 9, 12…<br/>
+          Entre carros: X do chip Veículo → próxima placa (sem login de novo).<br/>
+          Roda em <strong>segundo plano</strong> — acompanhe em /debug e baixe o PDF na home.
         </p>
       </form>
       <p class="hint">
