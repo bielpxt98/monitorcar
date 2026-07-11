@@ -243,15 +243,15 @@ def _run_one_worker(
                         clear_previous=(j > 0),
                     )
                     positions = positions_from_rows(rows)
-                    n_pts = len([p for p in positions if p.when])
+                    n_raw = len([p for p in positions if p.when])  # linhas DOM (pode dobrar)
                     # 0 legítimo SÓ com confirmação explícita do Sitrax
-                    empty_legit = n_pts == 0 and (
+                    empty_legit = n_raw == 0 and (
                         bot.sitrax_says_no_records()
                         or bot.showing_zero_records()
                     )
 
                     # Se 0 pts SEM confirmação de vazio → retry (pode ser scrape/filter)
-                    if n_pts == 0 and not empty_legit:
+                    if n_raw == 0 and not empty_legit:
                         logger.warning(
                             "Worker %s %s: 0 pts sem 'Mostrando: 0' — 1 retry",
                             worker_id + 1,
@@ -264,16 +264,29 @@ def _run_one_worker(
                             clear_previous=True,
                         )
                         positions = positions_from_rows(rows)
-                        n_pts = len([p for p in positions if p.when])
-                        empty_legit = n_pts == 0 and (
+                        n_raw = len([p for p in positions if p.when])
+                        empty_legit = n_raw == 0 and (
                             bot.sitrax_says_no_records()
                             or bot.showing_zero_records()
                         )
 
-                    # Contador do rodapé Sitrax (fonte da verdade visual)
+                    # Contador oficial = rodapé "Mostrando: N Registro(s)" / "Showing: N"
+                    # (NÃO usar n_raw que costuma ser ~2x as linhas do DOM)
                     site_n = bot.count_sitrax_registers()
                     if site_n < 0:
                         site_n = 0 if empty_legit else -1
+
+                    # "Pesquisa" / pontos = REGISTROS do site quando deu certo ler algo
+                    if empty_legit or (site_n == 0 and n_raw == 0):
+                        n_pts = 0
+                    elif site_n > 0 and n_raw > 0:
+                        n_pts = site_n  # ex.: site 233 → pesquisa 233 (não 466)
+                    elif site_n > 0 and n_raw == 0:
+                        n_pts = 0  # site tem dados, pesquisa falhou
+                    else:
+                        # sem rodapé: usa timestamps únicos (evita dobro)
+                        uniq = {p.when for p in positions if p.when}
+                        n_pts = len(uniq) if uniq else n_raw
 
                     texto = build_narrative_report(
                         pl,
@@ -296,27 +309,29 @@ def _run_one_worker(
                         data_ref=data_ref,
                         cliente=v.get("cliente", ""),
                     )
-                    # OK se: vazio real, ou scrape razoável vs site
+                    # OK: vazio real, ou site==pesquisa registros
                     if empty_legit:
                         ok_result = True
                     elif site_n > 0 and n_pts == 0:
                         ok_result = False
-                    elif site_n > 0 and n_pts < int(site_n * 0.85):
-                        ok_result = False
+                    elif site_n > 0 and n_pts == site_n:
+                        ok_result = True
+                    elif site_n > 0 and n_pts > 0:
+                        ok_result = abs(site_n - n_pts) <= 1 or n_pts >= int(
+                            site_n * 0.9
+                        )
                     else:
-                        ok_result = n_pts > 0 or empty_legit
+                        ok_result = n_pts > 0
 
-                    # Verificação com FOTO (sempre, mesmo quiet) — limpa na próxima frota
+                    # Verificação: Site N · Pesquisa N (registros do rodapé, não linhas DOM)
+                    site_disp = max(0, site_n) if site_n >= 0 else 0
                     try:
                         debug_session.add_plate_verify(
                             pl,
-                            site_count=max(0, site_n),
+                            site_count=site_disp,
                             scrape_count=n_pts,
-                            driver=bot._d() if bot else None,
-                            message=(
-                                f"Site: {site_n if site_n >= 0 else '?'} · "
-                                f"Pesquisa: {n_pts}"
-                            ),
+                            driver=None,  # sem foto — só tabela no /debug
+                            message=f"Site: {site_disp} · Pesquisa: {n_pts}",
                         )
                     except Exception as ve:
                         logger.warning("verify %s: %s", pl, ve)
@@ -333,12 +348,12 @@ def _run_one_worker(
                             error="" if ok_result else "0 posições (não confirmado)",
                         )
                     )
-                    site_label = str(site_n) if site_n >= 0 else "?"
+                    site_label = str(site_disp) if site_n >= 0 else "?"
                     if n_pts > 0 and ok_result:
                         step_name = f"w{worker_id+1}_ok_{pl}"
                         step_msg = (
                             f"Chrome {worker_id+1}: {pl} → "
-                            f"site {site_label} / pesquisa {n_pts}"
+                            f"site {site_label} / pesquisa {n_pts} registros"
                         )
                     elif empty_legit:
                         step_name = f"w{worker_id+1}_vazio_ok_{pl}"

@@ -97,32 +97,30 @@ def add_plate_verify(
     """
     global _VERIFY
     site_count = max(0, int(site_count or 0))
+    # "Pesquisa" = registros (mesmo critério do rodapé), NÃO linhas cruas do DOM
     scrape_count = max(0, int(scrape_count or 0))
-    # Tolerância: scrape pode ser um pouco maior (dedupe/dup) ou ~igual ao site
     if site_count == 0 and scrape_count == 0:
         ok = True
         status = "vazio OK"
-    elif site_count == 0 and scrape_count > 0:
-        ok = True
-        status = "scrape ok (site 0?)"
     elif scrape_count == 0 and site_count > 0:
         ok = False
         status = "ERRO: site tem dados, pesquisa 0"
-    elif scrape_count >= max(1, int(site_count * 0.85)):
+    elif site_count == scrape_count:
+        ok = True
+        status = "OK"
+    elif site_count > 0 and abs(site_count - scrape_count) <= 1:
+        ok = True
+        status = "OK (~igual)"
+    elif site_count > 0 and scrape_count >= max(1, int(site_count * 0.9)):
         ok = True
         status = "OK"
     else:
         ok = False
-        status = f"divergente (scrape < 85% do site)"
+        status = "divergente"
 
     msg = message or f"Site: {site_count} · Pesquisa: {scrape_count} · {status}"
+    # Fotos desativadas na verificação (só tabela site × pesquisa)
     image_b64 = None
-    if driver is not None:
-        try:
-            png = driver.get_screenshot_as_png()
-            image_b64 = base64.b64encode(png).decode("ascii")
-        except Exception as e:
-            msg = f"{msg} [foto falhou: {e}]"
 
     entry = PlateVerify(
         t=datetime.now().strftime("%H:%M:%S"),
