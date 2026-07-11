@@ -58,6 +58,10 @@
     <div class="card">
       <h2 style="font-size:1.05rem;margin:0 0 .5rem">2 Chromes permanentes (Veículos)</h2>
       {% set w = warm or {} %}
+      <p class="hint" style="margin:0 0 .5rem">
+        Ligam <strong>sozinhos</strong> no deploy e o sistema <strong>religa</strong> se algum cair.
+        Botão manual só se quiser forçar agora.
+      </p>
       <p style="margin:.25rem 0">
         Status:
         {% if w.ready_count is defined and w.ready_count >= 2 %}<span class="status-ok">2/2 PRONTOS</span>

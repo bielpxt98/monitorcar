@@ -55,6 +55,9 @@ class WarmPool:
         self.plates_ok: int = 0
         self.plates_err: int = 0
         self._rr: int = 0
+        self._keeper_stop = threading.Event()
+        self._keeper_thread: Optional[threading.Thread] = None
+        self._fleet_busy = False  # True enquanto Todos usa os Chromes
 
     # ——— status ———
 
@@ -132,8 +135,48 @@ class WarmPool:
     # ——— lifecycle ———
 
     def start(self, headless: bool = True, low_memory: bool = True) -> dict:
-        """Garante os 2 Chromes permanentes prontos (com retry no 2º)."""
-        return self.ensure_both(headless=headless, low_memory=low_memory)
+        """Garante os 2 Chromes permanentes prontos e liga o keep-alive."""
+        snap = self.ensure_both(headless=headless, low_memory=low_memory)
+        self.start_keeper()
+        return snap
+
+    def start_keeper(self, interval_sec: float = 45.0) -> None:
+        """
+        Thread em background: se algum Chrome cair (e não estiver em frota),
+        religa sozinho — sem botão manual.
+        """
+        if self._keeper_thread and self._keeper_thread.is_alive():
+            return
+
+        self._keeper_stop.clear()
+
+        def _loop() -> None:
+            logger.info("WarmPool keeper ligado (intervalo %.0fs)", interval_sec)
+            # 1ª passagem já no começo (além do start)
+            while not self._keeper_stop.wait(interval_sec):
+                if self._fleet_busy:
+                    continue
+                try:
+                    snap = self.snapshot()
+                    ready = int(snap.get("ready_count") or 0)
+                    total = int(snap.get("slot_count") or PERMANENT_SLOTS)
+                    if ready >= total:
+                        continue
+                    # algum slot morto/erro/off/stuck → reaquece
+                    logger.info(
+                        "Keeper: %s/%s prontos — reaquecendo pool…", ready, total
+                    )
+                    self.ensure_both(headless=True, low_memory=True)
+                except Exception as e:
+                    logger.warning("Keeper ensure_both: %s", e)
+
+        self._keeper_thread = threading.Thread(
+            target=_loop, name="warm-pool-keeper", daemon=True
+        )
+        self._keeper_thread.start()
+
+    def stop_keeper(self) -> None:
+        self._keeper_stop.set()
 
     def ensure_both(self, headless: bool = True, low_memory: bool = True) -> dict:
         """
@@ -254,6 +297,8 @@ class WarmPool:
             raise
 
     def stop(self) -> dict:
+        self.stop_keeper()
+        self._fleet_busy = False
         with self._lock:
             for slot in self._slots:
                 with slot.lock:
@@ -439,6 +484,7 @@ class WarmPool:
         Garante 2 Chromes e marca busy.
         Retorna [(worker_id, bot), ...] para o fleet_workers.
         """
+        self._fleet_busy = True
         self.ensure_both()
         out: list[tuple[int, Any]] = []
         with self._lock:
@@ -474,13 +520,17 @@ class WarmPool:
 
     def release_after_fleet(self) -> dict:
         """Devolve os 2 a Veículos (permanentes continuam ligados)."""
-        for slot in self._slots:
-            try:
-                with slot.lock:
-                    self._return_slot_to_vehicles(slot)
-            except Exception as e:
-                logger.warning("release slot %s: %s", slot.slot_id + 1, e)
-        return self.snapshot()
+        try:
+            for slot in self._slots:
+                try:
+                    with slot.lock:
+                        self._return_slot_to_vehicles(slot)
+                except Exception as e:
+                    logger.warning("release slot %s: %s", slot.slot_id + 1, e)
+            return self.snapshot()
+        finally:
+            self._fleet_busy = False
+            self.start_keeper()
 
     def list_fleet_plates(self) -> list[dict]:
         """Usa Chrome 1 permanente para listar a frota (sem Chrome extra)."""

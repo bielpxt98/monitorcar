@@ -9,6 +9,7 @@ Site mobile (nuvem):
 from __future__ import annotations
 
 import logging
+import time
 import traceback
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
@@ -41,16 +42,26 @@ def sitrax_configured() -> bool:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Ao subir: 2 Chromes permanentes logados em Veículos."""
+    """
+    Ao subir: 2 Chromes permanentes em Veículos + keeper que religa sozinho.
+    Não precisa clicar em “Ligar” no /debug.
+    """
     if sitrax_configured():
 
         def _warm():
             try:
                 from app.bot.warm_pool import warm_pool
 
-                logger.info("Aquecendo 2 Chromes permanentes (login → Veículos)…")
+                logger.info(
+                    "Auto-start: 2 Chromes permanentes (login → Veículos)…"
+                )
                 snap = warm_pool.start(headless=True, low_memory=True)
                 logger.info("Pool permanente: %s", snap.get("message"))
+                # reforço: se só 1 subiu, tenta o 2º de novo
+                if int(snap.get("ready_count") or 0) < 2:
+                    time.sleep(8)
+                    snap = warm_pool.ensure_both(headless=True, low_memory=True)
+                    logger.info("Pool após reforço: %s", snap.get("message"))
             except Exception as e:
                 logger.exception("Falha ao aquecer pool no startup: %s", e)
 
