@@ -3494,25 +3494,36 @@ class SitraxBot:
                     f"{ini_br}→{fim_br} chip={chip_now!r} filter_clicked=1",
                     shot=False,
                 )
-                # Se a grade JÁ tem muitos registros (Filter do popup aplicou),
+                # Se a grade JÁ tem dados (Filter do popup aplicou),
                 # NÃO clica Filter da barra de novo (evita tab crash com 2000+ linhas)
                 try:
                     n_now = self.count_sitrax_registers()
                 except Exception:
                     n_now = -1
-                if n_now and n_now > 20:
+                has_rows = False
+                try:
+                    has_rows = self.grid_has_data_rows()
+                except Exception:
+                    pass
+                # n_now>20 OU linhas com data GPS (contador às vezes falha no EN)
+                if (n_now is not None and n_now > 20) or has_rows:
                     logger.info(
-                        "Grade já com %s regs após Filter Date — só espera estabilizar",
+                        "Grade já com dados após Filter Date "
+                        "(count=%s rows=%s) — só espera estabilizar",
                         n_now,
+                        has_rows,
                     )
                     n_regs = self.wait_after_filter(
                         min_sec=3.0,
-                        timeout=20.0,
+                        timeout=22.0,
                         data_ini=data_ini,
                     )
+                    if n_regs <= 0 and has_rows:
+                        n_regs = n_now if (n_now and n_now > 0) else 50
                     self._trace(
                         "data_apos_filter_grade",
-                        f"Showing={n_regs} (sem re-Filter barra)",
+                        f"Showing={n_regs} (sem re-Filter barra) "
+                        f"count_raw={n_now} has_rows={has_rows}",
                         shot=False,
                     )
                 else:
@@ -4297,34 +4308,78 @@ class SitraxBot:
 
     def showing_zero_records(self) -> bool:
         """True se a grade mostra explicitamente 0 registros (PT/EN)."""
-        return self.count_sitrax_registers() == 0 and (
-            self.sitrax_says_no_records()
-            or bool(
+        n = self.count_sitrax_registers()
+        if n != 0:
+            return False
+        if self.sitrax_says_no_records():
+            return True
+        try:
+            return bool(
                 self._d().execute_script(
                     """
                     var body = ((document.body && document.body.innerText) || '');
                     return /mostrando\\s*:\\s*0\\b/i.test(body)
-                        || /showing\\s*:\\s*0\\b/i.test(body);
+                        || /showing\\s*:\\s*0\\b/i.test(body)
+                        || /of\\s+0\\s+entries/i.test(body)
+                        || /de\\s+0\\s+registros/i.test(body)
+                        || /showing\\s+0\\s+to\\s+0/i.test(body);
                     """
                 )
             )
-        )
+        except Exception:
+            return False
 
     def count_sitrax_registers(self) -> int:
         """
-        Lê o contador do rodapé Sitrax: 'Mostrando: 510 Registro(s)' / 'Showing: 510'.
+        Lê o total de registros do rodapé DataTables/Sitrax.
+
+        Formatos reais:
+          EN: "Showing 1 to 50 of 2,397 entries"  (sem dois-pontos)
+          PT: "Mostrando 1 a 50 de 2.397 registros"
+          PT: "Mostrando: 2397 Registro(s)"
+          EN: "Showing: 510"
         -1 se não achar o número.
         """
         try:
             n = self._d().execute_script(
                 """
+                function parseTotal(text) {
+                  if (!text) return -1;
+                  // DataTables EN/PT: "... of 2,397 entries" / "... de 2.397 ..."
+                  var m = text.match(
+                    /(?:Showing|Mostrando)[\\s\\S]{0,60}?\\b(?:of|de)\\s+([\\d.,\\s]+)/i
+                  );
+                  if (m) {
+                    var digits = String(m[1]).replace(/[^\\d]/g, '');
+                    if (digits) return parseInt(digits, 10);
+                  }
+                  // "Showing: 2397" / "Mostrando: 2397"
+                  m = text.match(/Mostrando\\s*:\\s*([\\d.,]+)/i)
+                   || text.match(/Showing\\s*:\\s*([\\d.,]+)/i);
+                  if (m) {
+                    var d2 = String(m[1]).replace(/[^\\d]/g, '');
+                    if (d2) return parseInt(d2, 10);
+                  }
+                  m = text.match(/([\\d.,]+)\\s*Registro\\(s\\)/i)
+                   || text.match(/([\\d.,]+)\\s*Register\\(s\\)/i)
+                   || text.match(/([\\d.,]+)\\s*entries/i);
+                  if (m) {
+                    var d3 = String(m[1]).replace(/[^\\d]/g, '');
+                    if (d3) return parseInt(d3, 10);
+                  }
+                  return -1;
+                }
+                // Prefer o info do DataTables (evita lixo do body)
+                var infos = document.querySelectorAll(
+                  '.dataTables_info, [id$="_info"], .dataTables_wrapper .dataTables_info'
+                );
+                for (var i = 0; i < infos.length; i++) {
+                  var t = (infos[i].innerText || infos[i].textContent || '').trim();
+                  var n = parseTotal(t);
+                  if (n >= 0) return n;
+                }
                 var body = ((document.body && document.body.innerText) || '');
-                var m = body.match(/Mostrando\\s*:\\s*(\\d+)/i)
-                     || body.match(/Showing\\s*:\\s*(\\d+)/i)
-                     || body.match(/(\\d+)\\s*Registro\\(s\\)/i)
-                     || body.match(/(\\d+)\\s*Register\\(s\\)/i);
-                if (m) return parseInt(m[1], 10);
-                return -1;
+                return parseTotal(body);
                 """
             )
             return int(n) if n is not None else -1
@@ -4379,22 +4434,16 @@ class SitraxBot:
                 n0 = self.count_sitrax_registers()
                 if n0 == 0:
                     self._sleep(0.8)
-                    if self.count_sitrax_registers() == 0:
+                    if self.count_sitrax_registers() == 0 and not self.grid_has_data_rows():
                         return 0
             n = self.count_sitrax_registers()
             if n < 0:
-                n = 0 if self.grid_has_data_rows() else -1
-            # se pediu período multi-dia, espera o chip/linhas refletirem início
-            if data_ini and n and n > 0:
-                try:
-                    ini_br = data_ini.strftime("%d/%m/%Y")
-                    body = self._d().find_element(By.TAG_NAME, "body").text or ""
-                    # se a grade só mostra "hoje" e o início é outro dia, ainda carregando
-                    if ini_br not in body and data_ini != date.today():
-                        # ainda pode ser que a 1ª página não tenha o dia inicial
-                        pass
-                except Exception:
-                    pass
+                # Contador não leu (ex.: EN "Showing 1 to 50 of 2,397")
+                # mas a grade tem linhas → trata como dados presentes
+                if self.grid_has_data_rows():
+                    n = max(last_n, 50) if last_n > 0 else 50
+                else:
+                    n = -1
             if n >= 0 and n == last_n and n > 0:
                 stable += 1
                 if stable >= 2:  # mesmo N em 2 leituras (~1s)
@@ -4409,6 +4458,8 @@ class SitraxBot:
             last_n = n
             self._sleep(0.5)
         final = self.count_sitrax_registers()
+        if final < 0 and self.grid_has_data_rows():
+            final = last_n if last_n > 0 else 50
         logger.info(
             "Pós-Filter timeout: Showing=%s (%.1fs)",
             final,
@@ -4443,12 +4494,34 @@ class SitraxBot:
 
                 n = d.execute_script(
                     """
+                    function parseTotal(text) {
+                      if (!text) return -1;
+                      var m = text.match(
+                        /(?:Showing|Mostrando)[\\s\\S]{0,60}?\\b(?:of|de)\\s+([\\d.,\\s]+)/i
+                      );
+                      if (m) {
+                        var dig = String(m[1]).replace(/[^\\d]/g, '');
+                        if (dig) return parseInt(dig, 10);
+                      }
+                      m = text.match(/Mostrando\\s*:\\s*([\\d.,]+)/i)
+                       || text.match(/Showing\\s*:\\s*([\\d.,]+)/i);
+                      if (m) {
+                        var d2 = String(m[1]).replace(/[^\\d]/g, '');
+                        if (d2) return parseInt(d2, 10);
+                      }
+                      return -1;
+                    }
+                    var infos = document.querySelectorAll(
+                      '.dataTables_info, [id$="_info"]'
+                    );
+                    for (var j = 0; j < infos.length; j++) {
+                      var tt = (infos[j].innerText || infos[j].textContent || '');
+                      var nn = parseTotal(tt);
+                      if (nn >= 0) return nn;
+                    }
                     var body = (document.body && document.body.innerText) || '';
-                    var m = body.match(/Mostrando\\s*:\\s*(\\d+)/i)
-                         || body.match(/Showing\\s*:\\s*(\\d+)/i)
-                         || body.match(/(\\d+)\\s*Registro/i)
-                         || body.match(/(\\d+)\\s*Record/i);
-                    if (m && parseInt(m[1], 10) >= 0) return parseInt(m[1], 10);
+                    var fromBody = parseTotal(body);
+                    if (fromBody >= 0) return fromBody;
 
                     var DATE_RE = /\\d{2}\\/\\d{2}\\/\\d{4}\\s+\\d{2}:\\d{2}/;
                     var trs = document.querySelectorAll(
