@@ -3707,10 +3707,15 @@ class SitraxBot:
         viravam ícones vazios e o robô gravava 0 pts com a tela CHEIA de dados.
         """
         d = self._d()
-        self._sleep(0.6)
-        # rola vertical + horizontal (endereço fica à direita e some do scrape)
+        self._sleep(0.35)
+        # Scroll leve: com 2000+ linhas scroll pesado derruba o Chrome (tab crash)
         try:
-            for _ in range(5):
+            n_reg = self.count_sitrax_registers()
+        except Exception:
+            n_reg = 0
+        scrolls = 2 if (n_reg and n_reg > 400) else 4
+        try:
+            for _ in range(scrolls):
                 d.execute_script(
                     """
                     var boxes = document.querySelectorAll(
@@ -3720,14 +3725,14 @@ class SitraxBot:
                     for (var i = 0; i < boxes.length; i++) {
                       try {
                         boxes[i].scrollTop = boxes[i].scrollHeight;
-                        boxes[i].scrollLeft = boxes[i].scrollWidth;
+                        boxes[i].scrollLeft = Math.min(
+                          boxes[i].scrollWidth, boxes[i].clientWidth + 200
+                        );
                       } catch(e) {}
                     }
-                    window.scrollBy(0, 400);
                     """
                 )
-                self._sleep(0.2)
-            # volta um pouco à esquerda para datas + modo também estarem no layout
+                self._sleep(0.12)
             d.execute_script(
                 """
                 var boxes = document.querySelectorAll('.dataTables_scrollBody');
@@ -3736,7 +3741,7 @@ class SitraxBot:
                 }
                 """
             )
-            self._sleep(0.15)
+            self._sleep(0.1)
         except Exception:
             pass
 
@@ -4127,8 +4132,25 @@ class SitraxBot:
 
         self.set_date_filter(data_ini, data_fim)
 
-        # após filtro de data o chip do veículo pode “sumir” no DOM por AJAX
-        if not self.wait_vehicle_chip(placa, timeout=6.0):
+        # Se a grade JÁ carregou (ex.: Showing=2397), NÃO re-seleciona veículo
+        # nem re-Filter — isso derruba o Chrome (tab crash).
+        try:
+            n = self.count_sitrax_registers()
+        except Exception:
+            n = -1
+        if n is not None and n > 20:
+            logger.info(
+                "prepare_warm: grade pronta com %s regs — segue scrape", n
+            )
+            self._trace(
+                "prepare_grade_pronta",
+                f"Showing={n} após data — sem re-Filter/modal",
+                shot=False,
+            )
+            return
+
+        # grade ainda vazia: tenta re-selecionar placa e Filter
+        if not self.wait_vehicle_chip(placa, timeout=4.0):
             logger.warning(
                 "Chip %s sumiu após data — re-seleciona SEM limpar data",
                 placa,
@@ -4137,19 +4159,11 @@ class SitraxBot:
                 self.open_vehicle_selector()
                 self.load_vehicle_list(placa=placa)
                 self.select_vehicle_by_plate(placa)
-                # NÃO reabrir calendário de data — só Filter da barra
             except Exception as e:
                 logger.warning("re-select após data: %s", e)
 
-        # set_date_filter já aplica Filter Date + espera grade se possível
-        # Só re-Filter da barra se Showing ainda 0 / sem dados
         try:
-            n = self.count_sitrax_registers()
-            if n is not None and n > 20:
-                logger.info(
-                    "prepare_warm: grade já com %s regs — sem re-Filter", n
-                )
-            elif n <= 0 and not self.sitrax_says_no_records():
+            if n <= 0 and not self.sitrax_says_no_records():
                 self.click_filtrar()
                 self.wait_after_filter(
                     min_sec=3.2, timeout=22.0, data_ini=data_ini
@@ -4157,7 +4171,7 @@ class SitraxBot:
         except Exception as e:
             logger.warning("click_filtrar após data (warm): %s", e)
             self._sleep(3.0)
-        self.wait_vehicle_chip(placa, timeout=4.0)
+        self.wait_vehicle_chip(placa, timeout=3.0)
 
     def prepare_next_fleet_plate(
         self,
@@ -4515,58 +4529,77 @@ class SitraxBot:
                 )
             except Exception:
                 pass
-            self._sleep(0.5)
 
-            # Espera o chip (página/AJAX); se falhar, re-seleciona placa (mantém data)
-            chip_ok = self.wait_vehicle_chip(placa_u, timeout=10.0)
-            if not chip_ok:
-                logger.warning(
-                    "Chip %s lento após prepare (tentativa %s) — re-seleciona",
+            # Se prepare já deixou a grade cheia (data filter OK), NÃO re-Filter
+            # nem reabre modal — isso crasha o Chrome com 2000+ linhas.
+            try:
+                n_ready = self.count_sitrax_registers()
+            except Exception:
+                n_ready = -1
+
+            chip_ok = self.vehicle_chip_has_plate(placa_u)
+            if n_ready is not None and n_ready > 20:
+                logger.info(
+                    "fetch %s: grade já com %s — scrape direto",
                     placa_u,
-                    attempt + 1,
+                    n_ready,
                 )
                 self._trace(
-                    f"chip_lento_{placa_u}",
-                    f"Chip {placa_u} não estável; re-seleciona placa e Filter",
-                    ok=True,
+                    f"scrape_direto_{placa_u}",
+                    f"Showing={n_ready} — sem re-Filter (evita crash)",
                     shot=False,
                 )
-                try:
-                    if not self._vehicle_modal_open():
-                        self.open_vehicle_selector()
-                    self.load_vehicle_list(placa=placa_u)
-                    self.select_vehicle_by_plate(placa_u)
-                    chip_ok = self.wait_vehicle_chip(placa_u, timeout=5.0)
-                except Exception as e:
-                    logger.warning("re-select chip lento: %s", e)
-
-            try:
-                self.click_filtrar()
-            except Exception as e:
-                logger.warning("re-Filter %s: %s", placa_u, e)
-
-            # ~3s+ até a grade atualizar (multi-dia demora mais)
-            n_hint = self.wait_after_filter(
-                min_sec=3.2,
-                timeout=30.0,
-                data_ini=data_ini,
-            )
-            if n_hint <= 0:
-                n_hint = self.wait_positions_grid(timeout=20)
-            # se ainda 0 e SEM mensagem de vazio: Filter de novo e espera mais
-            if n_hint == 0 and not (
-                self.sitrax_says_no_records() or self.showing_zero_records()
-            ):
+                n_hint = n_ready
+                self._sleep(0.8)  # folga curta; já esperou no set_date_filter
+            else:
+                chip_ok = self.wait_vehicle_chip(placa_u, timeout=6.0)
+                if not chip_ok:
+                    logger.warning(
+                        "Chip %s lento (tentativa %s) — re-seleciona",
+                        placa_u,
+                        attempt + 1,
+                    )
+                    try:
+                        if not self._vehicle_modal_open():
+                            self.open_vehicle_selector()
+                        self.load_vehicle_list(placa=placa_u)
+                        self.select_vehicle_by_plate(placa_u)
+                        chip_ok = self.wait_vehicle_chip(placa_u, timeout=4.0)
+                    except Exception as e:
+                        logger.warning("re-select chip lento: %s", e)
                 try:
                     self.click_filtrar()
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.warning("re-Filter %s: %s", placa_u, e)
                 n_hint = self.wait_after_filter(
-                    min_sec=3.0, timeout=22.0, data_ini=data_ini
+                    min_sec=3.2,
+                    timeout=30.0,
+                    data_ini=data_ini,
                 )
+                if n_hint <= 0:
+                    n_hint = self.wait_positions_grid(timeout=18)
+                if n_hint == 0 and not (
+                    self.sitrax_says_no_records()
+                    or self.showing_zero_records()
+                ):
+                    try:
+                        self.click_filtrar()
+                    except Exception:
+                        pass
+                    n_hint = self.wait_after_filter(
+                        min_sec=3.0, timeout=20.0, data_ini=data_ini
+                    )
 
-            self.try_scroll_all()
-            rows = self.scrape_positions_table()
+            # scrape leve se muitos registros (não scroll agressivo)
+            if n_hint and n_hint > 500:
+                self._sleep(0.4)
+            else:
+                self.try_scroll_all()
+            try:
+                rows = self.scrape_positions_table()
+            except Exception as e:
+                logger.warning("scrape_positions_table: %s", e)
+                rows = []
             last_rows = rows or []
             n_scrape = len(last_rows)
 
