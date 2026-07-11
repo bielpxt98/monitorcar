@@ -498,6 +498,44 @@ async def gerar(
     return RedirectResponse(url="/", status_code=303)
 
 
+@app.get("/api/placas")
+async def api_placas():
+    """
+    Lista placas conhecidas (cache da última listagem no Sitrax).
+    Usado pelo botão (i) na home para o usuário escolher e pesquisar.
+    """
+    plates: list = []
+    source = "empty"
+    try:
+        from app.bot.warm_pool import warm_pool
+
+        plates = warm_pool.get_plates_cache()
+        if plates:
+            source = "cache"
+    except Exception:
+        pass
+    # fallback: placas da última verificação de frota
+    if not plates:
+        try:
+            from app.bot.debug_session import get_verify
+
+            seen = set()
+            for v in get_verify():
+                pl = (v.placa or "").upper()
+                if pl and pl not in seen:
+                    seen.add(pl)
+                    plates.append({"placa": pl, "display": "", "cliente": ""})
+            if plates:
+                source = "verify"
+        except Exception:
+            pass
+    return {
+        "plates": plates,
+        "source": source,
+        "count": len(plates),
+    }
+
+
 @app.get("/job-status")
 async def job_status():
     return {

@@ -146,6 +146,45 @@
     #loading { display: none; text-align: center; color: var(--muted); margin-top: .75rem; font-size: .9rem; }
     .steps { font-size: .8rem; color: var(--muted); line-height: 1.5; }
     .steps ol { padding-left: 1.15rem; margin: .4rem 0 0; }
+    .label-row {
+      display: flex; align-items: center; justify-content: space-between;
+      gap: .5rem; margin-bottom: .3rem;
+    }
+    .label-row label { margin-bottom: 0; }
+    .btn-info {
+      width: 1.55rem; height: 1.55rem; border-radius: 999px; border: 1px solid var(--border);
+      background: rgba(251,146,60,.15); color: #fdba74; font-size: .75rem; font-weight: 800;
+      font-style: italic; font-family: Georgia, serif; cursor: pointer; padding: 0;
+      line-height: 1; flex-shrink: 0;
+    }
+    .btn-info:hover { background: rgba(255,107,0,.25); border-color: var(--accent); }
+    .plate-modal {
+      display: none; position: fixed; inset: 0; z-index: 50;
+      background: rgba(0,0,0,.55); align-items: flex-end; justify-content: center;
+      padding: 1rem;
+    }
+    .plate-modal.open { display: flex; }
+    .plate-sheet {
+      width: 100%; max-width: 480px; max-height: 70vh; overflow: auto;
+      background: #1a1f35; border: 1px solid var(--border); border-radius: 16px 16px 12px 12px;
+      padding: 1rem; box-shadow: 0 -8px 40px rgba(0,0,0,.45);
+    }
+    .plate-sheet h3 { margin: 0 0 .35rem; font-size: 1rem; }
+    .plate-sheet .hint { margin: 0 0 .75rem; }
+    .plate-list { display: flex; flex-wrap: wrap; gap: .45rem; }
+    .plate-chip {
+      border: 1px solid var(--border); background: #0f1324; color: var(--text);
+      border-radius: 999px; padding: .45rem .75rem; font-size: .85rem; font-weight: 700;
+      cursor: pointer; letter-spacing: .02em;
+    }
+    .plate-chip:hover, .plate-chip:focus {
+      border-color: var(--accent); background: rgba(255,107,0,.12); color: #fdba74;
+    }
+    .plate-sheet .close-row { margin-top: .9rem; }
+    .plate-sheet .btn-close {
+      width: 100%; border: 0; border-radius: 12px; padding: .75rem;
+      background: #374151; color: #fff; font-weight: 600; cursor: pointer;
+    }
   </style>
 </head>
 <body>
@@ -191,7 +230,10 @@
           </label>
         </div>
 
-        <label for="placa">Placa (obrigatória em <strong>1 veículo</strong>; ignore em Todos)</label>
+        <div class="label-row">
+          <label for="placa">Placa (obrigatória em <strong>1 veículo</strong>; ignore em Todos)</label>
+          <button type="button" class="btn-info" id="btn-plates-info" title="Listar placas da frota" aria-label="Listar placas">i</button>
+        </div>
         <input id="placa" name="placa" type="text" placeholder="Ex: PCE7B03"
                value="{{ placa or '' }}" style="text-transform:uppercase"
                autocomplete="off" />
@@ -303,6 +345,19 @@
   <div id="loading" style="display:none;text-align:center;color:var(--muted);padding:1rem">
     Processando no servidor… pode demorar. Não feche esta aba.
   </div>
+
+  <!-- Modal: escolher placa -->
+  <div class="plate-modal" id="plate-modal" role="dialog" aria-modal="true" aria-labelledby="plate-modal-title">
+    <div class="plate-sheet">
+      <h3 id="plate-modal-title">Placas da frota</h3>
+      <p class="hint" id="plate-modal-hint">Toque numa placa para preencher e pesquisar.</p>
+      <div class="plate-list" id="plate-list"></div>
+      <div class="close-row">
+        <button type="button" class="btn-close" id="plate-modal-close">Fechar</button>
+      </div>
+    </div>
+  </div>
+
   <script>
     function wire(formId, btnId, label) {
       const form = document.getElementById(formId);
@@ -316,6 +371,70 @@
     }
     wire('form-auto', 'btn-auto', 'Gerando…');
     wire('form-pdf', 'btn-pdf', 'Gerando…');
+
+    // Botão (i): lista placas e permite clicar para pesquisar
+    (function platePicker() {
+      const btn = document.getElementById('btn-plates-info');
+      const modal = document.getElementById('plate-modal');
+      const list = document.getElementById('plate-list');
+      const hint = document.getElementById('plate-modal-hint');
+      const closeBtn = document.getElementById('plate-modal-close');
+      const placaInput = document.getElementById('placa');
+      const form = document.getElementById('form-auto');
+      if (!btn || !modal || !list) return;
+
+      function openModal() { modal.classList.add('open'); }
+      function closeModal() { modal.classList.remove('open'); }
+
+      closeBtn && closeBtn.addEventListener('click', closeModal);
+      modal.addEventListener('click', (e) => {
+        if (e.target === modal) closeModal();
+      });
+
+      function pickPlate(pl) {
+        if (placaInput) {
+          placaInput.value = pl;
+          placaInput.dispatchEvent(new Event('input', { bubbles: true }));
+        }
+        // modo 1 veículo
+        const radio = form && form.querySelector('input[name=modo][value=placa]');
+        if (radio) radio.checked = true;
+        closeModal();
+        // envia pesquisa
+        if (form) form.requestSubmit ? form.requestSubmit() : form.submit();
+      }
+
+      btn.addEventListener('click', async () => {
+        list.innerHTML = '<span class="hint">Carregando…</span>';
+        hint.textContent = 'Toque numa placa para preencher e pesquisar.';
+        openModal();
+        try {
+          const r = await fetch('/api/placas', { cache: 'no-store' });
+          const j = await r.json();
+          const plates = j.plates || [];
+          list.innerHTML = '';
+          if (!plates.length) {
+            hint.textContent = 'Nenhuma placa em cache. Rode “Todos” uma vez (ou aguarde o robô listar a frota) e abra de novo.';
+            return;
+          }
+          hint.textContent = plates.length + ' placa(s) · toque para pesquisar (1 veículo).';
+          plates.forEach((p) => {
+            const pl = (p.placa || '').toUpperCase();
+            if (!pl) return;
+            const b = document.createElement('button');
+            b.type = 'button';
+            b.className = 'plate-chip';
+            b.textContent = pl;
+            b.title = [p.display, p.cliente].filter(Boolean).join(' · ') || pl;
+            b.addEventListener('click', () => pickPlate(pl));
+            list.appendChild(b);
+          });
+        } catch (e) {
+          list.innerHTML = '';
+          hint.textContent = 'Não foi possível carregar as placas. Tente de novo.';
+        }
+      });
+    })();
 
     // Frota em background: atualiza status e recarrega quando terminar
     (function pollJob() {

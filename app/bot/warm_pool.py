@@ -59,6 +59,8 @@ class WarmPool:
         self._keeper_stop = threading.Event()
         self._keeper_thread: Optional[threading.Thread] = None
         self._fleet_busy = False  # True enquanto Todos usa os Chromes
+        # cache de placas (para UI escolher placa sem abrir Chrome de novo)
+        self._plates_cache: list[dict] = []
 
     # ——— status ———
 
@@ -541,7 +543,32 @@ class WarmPool:
             )
         except Exception:
             pass
+        self.set_plates_cache(vehicles)
         return vehicles
+
+    def set_plates_cache(self, vehicles: list[dict]) -> None:
+        clean = []
+        seen = set()
+        for v in vehicles or []:
+            pl = (v.get("placa") or "").strip().upper()
+            if not pl or pl in seen:
+                continue
+            if pl in ("TODOS", "TODAS", "ALL", "FROTA"):
+                continue
+            seen.add(pl)
+            clean.append(
+                {
+                    "placa": pl,
+                    "display": (v.get("display") or "").strip(),
+                    "cliente": (v.get("cliente") or "").strip(),
+                }
+            )
+        with self._lock:
+            self._plates_cache = clean
+
+    def get_plates_cache(self) -> list[dict]:
+        with self._lock:
+            return list(self._plates_cache)
 
 
 warm_pool = WarmPool(n_slots=PERMANENT_SLOTS)
