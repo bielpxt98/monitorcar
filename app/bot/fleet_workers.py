@@ -6,6 +6,10 @@ Placas 1-indexadas:
   Worker 2 → 2, 4, 6, 8, 10...
 
 Preferência: reutilizar bots já logados em Veículos (keep_alive=True).
+
+IMPORTANTE: NÃO reinicia o Chrome a cada N placas.
+Só reabre browser se a sessão morrer (tab crashed / invalid session).
+Entre placas: X no chip → próxima placa no MESMO Chrome.
 """
 
 from __future__ import annotations
@@ -21,6 +25,8 @@ from typing import Any, Optional
 logger = logging.getLogger(__name__)
 
 DEFAULT_WORKERS = 2
+# Legado: havia RESTART_EVERY=3 — removido. Só crash reinicia o browser.
+RESTART_ONLY_ON_CRASH = True
 
 
 def partition_round_robin(
@@ -208,7 +214,7 @@ def _run_one_worker(
             debug_session.step(
                 f"w{worker_id+1}_{j+1}_de_{len(assigned)}_{pl}",
                 f"Chrome {worker_id+1} → ({j+1}/{len(assigned)}) {pl} "
-                f"[posição lista #{order+1}]",
+                f"[posição lista #{order+1}] (mesmo browser, sem reinício periódico)",
                 ok=True,
                 screenshot=False,
             )
@@ -217,21 +223,29 @@ def _run_one_worker(
             while attempts < 2:
                 attempts += 1
                 try:
+                    # Só reabre Chrome se a aba/sessão morreu — NUNCA por contagem de placas
                     if bot is None or not bot.alive():
+                        logger.warning(
+                            "Worker %s: sessão morta antes de %s — reinício por crash",
+                            worker_id + 1,
+                            pl,
+                        )
                         if bot is not None:
                             try:
                                 bot.close()
                             except Exception:
                                 pass
                             bot = None
+                        existing_bot = None
                         bot = _start()
 
                     assert bot is not None
+                    # Mesmo Chrome: 1ª placa ou X do chip + próxima (sem fechar browser)
                     rows = bot.fetch_positions_for_fleet_plate(
                         pl,
                         data_ini=data_ini,
                         data_fim=data_fim,
-                        clear_previous=(j > 0 or order > 0),
+                        clear_previous=(j > 0),
                     )
                     positions = positions_from_rows(rows)
                     n_pts = len([p for p in positions if p.when])
