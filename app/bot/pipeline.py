@@ -106,14 +106,31 @@ def generate_vehicle_report_cloud(
     data_ini: Optional[date] = None,
     data_fim: Optional[date] = None,
     headless: bool = True,
+    use_warm: bool = True,
 ) -> ReportResult:
     """
     Executa o robô no servidor:
-      - downloads do Sitrax vão para pasta TEMP
+      - preferência: sessão permanente (WarmPool) já logada em Veículos
+      - fallback: Chrome frio (login + navegação completa)
       - gera só o PDF-resumo em memória
-      - apaga a pasta TEMP (inclusive PDFs brutos)
     """
     from app.bot.sitrax import SitraxBot
+
+    # Sessão quente = testes bem mais rápidos (sem re-login)
+    if use_warm:
+        try:
+            from app.bot.warm_pool import warm_pool
+
+            return warm_pool.run_plate(
+                placa=placa,
+                data_ini=data_ini,
+                data_fim=data_fim,
+                headless=headless,
+            )
+        except Exception as e:
+            logger.warning(
+                "WarmPool falhou (%s); caindo para Chrome frio", e
+            )
 
     data_ini = data_ini or date.today()
     data_fim = data_fim or data_ini

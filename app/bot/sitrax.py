@@ -2103,6 +2103,108 @@ class SitraxBot:
                 d.execute_script("window.scrollBy(0, 1200);")
             self._sleep(0.25)
 
+    def _vehicle_modal_open(self) -> bool:
+        """True se o modal Selecione Veículo / input de placa está ativo."""
+        d = self._d()
+        try:
+            if d.execute_script(
+                """
+                var inp = document.querySelector(
+                  "#itFiltroCveiPlaca, input[id='formModalSearchVeiculo:itCveiPlaca'], input[id*='itCveiPlaca']"
+                );
+                if (inp) {
+                  var r = inp.getBoundingClientRect();
+                  if (r.width > 2 && r.height > 2) return true;
+                }
+                var body = (document.body && document.body.innerText) || '';
+                return body.indexOf('Selecione Veículo') >= 0
+                    || body.indexOf('Selecione Veiculo') >= 0
+                    || body.indexOf('Select Vehicle') >= 0;
+                """
+            ):
+                return True
+        except Exception:
+            pass
+        return False
+
+    def _on_posicoes_screen(self) -> bool:
+        try:
+            return bool(self._posicoes_screen_ready())
+        except Exception:
+            return False
+
+    def prepare_historico_warm(
+        self,
+        placa: str,
+        data_ini: Optional[date] = None,
+        data_fim: Optional[date] = None,
+    ) -> None:
+        """
+        Caminho rápido (sessão já logada):
+          modal Veículos (ou reabre) → filtra placa → Selecionar → data → Filter.
+        Não faz login de novo.
+        """
+        self._close_date_popup_if_open()
+        # Se modal já aberto (warm idle), usa; senão garante Posições + Veículo
+        if not self._vehicle_modal_open():
+            if not self._on_posicoes_screen():
+                self.open_posicoes()
+                self._sleep(0.6)
+            try:
+                self.open_vehicle_selector()
+            except TimeoutException:
+                logger.warning("Veículo não achado no warm; reabrindo Posições…")
+                self.open_posicoes()
+                self._sleep(0.8)
+                self.open_vehicle_selector()
+        self.load_vehicle_list(placa=placa)
+        self.select_vehicle_by_plate(placa)
+        self.set_date_filter(data_ini, data_fim)
+        self.click_filtrar()
+        self._sleep(1.2)
+
+    def return_to_vehicles_ready(self) -> None:
+        """
+        Após uma consulta: fecha popups e deixa o modal Veículos aberto
+        com a lista pronta para a próxima placa.
+        """
+        d = self._d()
+        self._close_date_popup_if_open()
+        try:
+            d.execute_script(
+                "if (typeof hideModalSearchVeiculo === 'function') hideModalSearchVeiculo();"
+            )
+        except Exception:
+            pass
+        try:
+            from selenium.webdriver.common.keys import Keys
+
+            d.find_element(By.TAG_NAME, "body").send_keys(Keys.ESCAPE)
+        except Exception:
+            pass
+        self._sleep(0.4)
+
+        if not self._on_posicoes_screen():
+            self.open_posicoes()
+            self._sleep(0.5)
+        self._close_date_popup_if_open()
+        if not self._vehicle_modal_open():
+            self.open_vehicle_selector()
+        # lista cheia (sem placa) — pronta para o próximo filtro
+        try:
+            self.load_vehicle_list()
+        except Exception:
+            # se lista falhar, tenta lupa/reload 1x
+            self.open_vehicle_selector()
+            self.load_vehicle_list()
+        n = self._count_vehicle_items()
+        self._trace(
+            "warm_idle_veiculos",
+            f"Aguardando próxima placa — {n} veículo(s) na lista",
+            ok=True,
+        )
+        logger.info("Sessão pronta em Veículos (%s itens)", n)
+
     def _prepare_historico_filtrado(
         self,
         placa: str,

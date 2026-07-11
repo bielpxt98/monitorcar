@@ -11,6 +11,7 @@ from __future__ import annotations
 import logging
 import traceback
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import asynccontextmanager
 from datetime import date, datetime
 from pathlib import Path
 from typing import Optional
@@ -29,9 +30,42 @@ logging.basicConfig(
 logger = logging.getLogger("sitrax-bot")
 
 BASE = Path(__file__).resolve().parent
-app = FastAPI(title="Resumo de Rota", version="2.0.0")
-templates = Jinja2Templates(directory=str(BASE / "templates"))
 executor = ThreadPoolExecutor(max_workers=1)  # 1 por vez no Chrome
+
+
+def sitrax_configured() -> bool:
+    return bool(
+        settings.sitrax_cliente and settings.sitrax_usuario and settings.sitrax_senha
+    )
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Ao subir: deixa o Chrome logado em Veículos (testes rápidos)."""
+    if sitrax_configured():
+
+        def _warm():
+            try:
+                from app.bot.warm_pool import warm_pool
+
+                logger.info("Aquecendo robô permanente (login → Veículos)…")
+                warm_pool.start(headless=True, low_memory=True)
+                logger.info("Robô permanente pronto: %s", warm_pool.message)
+            except Exception as e:
+                logger.exception("Falha ao aquecer robô no startup: %s", e)
+
+        executor.submit(_warm)
+    yield
+    try:
+        from app.bot.warm_pool import warm_pool
+
+        warm_pool.stop()
+    except Exception:
+        pass
+
+
+app = FastAPI(title="Resumo de Rota", version="2.0.0", lifespan=lifespan)
+templates = Jinja2Templates(directory=str(BASE / "templates"))
 
 static_dir = BASE / "static"
 static_dir.mkdir(exist_ok=True)
@@ -61,12 +95,6 @@ def parse_date(value: str) -> Optional[date]:
         except ValueError:
             continue
     return None
-
-
-def sitrax_configured() -> bool:
-    return bool(
-        settings.sitrax_cliente and settings.sitrax_usuario and settings.sitrax_senha
-    )
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -124,6 +152,14 @@ def _run_job(modo: str, placa: str, d_ini: date, d_fim: date):
     from pypdf import PdfWriter, PdfReader
     import io
     import gc
+
+    # Libera RAM: fecha sessão permanente antes da frota (Chrome extra)
+    try:
+        from app.bot.warm_pool import warm_pool
+
+        warm_pool.stop()
+    except Exception:
+        pass
 
     debug_session.start_run(placa="FROTA")
     textos: list[str] = []
@@ -302,6 +338,13 @@ def _run_job(modo: str, placa: str, d_ini: date, d_fim: date):
                             break
             finally:
                 _kill_bot()
+                # Reaquece sessão permanente para testes de 1 placa
+                try:
+                    from app.bot.warm_pool import warm_pool
+
+                    warm_pool.start(headless=True, low_memory=True)
+                except Exception as e:
+                    logger.warning("Reaquecer WarmPool após frota: %s", e)
 
         out = io.BytesIO()
         if len(pdf_writer.pages) == 0:
@@ -620,10 +663,18 @@ async def api_relatorio(
 
 @app.get("/health")
 async def health():
+    warm = {}
+    try:
+        from app.bot.warm_pool import warm_pool
+
+        warm = warm_pool.snapshot()
+    except Exception:
+        pass
     return {
         "status": "ok",
         "configured": sitrax_configured(),
         "mode": "cloud-summary-only",
+        "warm": warm,
     }
 
 
@@ -631,6 +682,7 @@ async def health():
 async def debug_panel(request: Request):
     """Painel de calibração: última execução do robô com fotos de cada passo."""
     from app.bot.debug_session import get_last_run
+    from app.bot.warm_pool import warm_pool
 
     run = get_last_run()
     return templates.TemplateResponse(
@@ -639,8 +691,82 @@ async def debug_panel(request: Request):
         {
             "run": run,
             "configured": sitrax_configured(),
+            "warm": warm_pool.snapshot(),
+            "today": date.today().isoformat(),
         },
     )
+
+
+@app.get("/warm/status")
+async def warm_status():
+    from app.bot.warm_pool import warm_pool
+
+    return warm_pool.snapshot()
+
+
+@app.post("/warm/start")
+async def warm_start():
+    """Liga o Chrome permanente (login → Posições → modal Veículos)."""
+    import asyncio
+
+    if not sitrax_configured():
+        return RedirectResponse(url="/debug", status_code=303)
+
+    def job():
+        from app.bot.warm_pool import warm_pool
+
+        warm_pool.start(headless=True, low_memory=True)
+
+    loop = asyncio.get_event_loop()
+    try:
+        await loop.run_in_executor(executor, job)
+    except Exception as e:
+        logger.exception("Warm start: %s", e)
+    return RedirectResponse(url="/debug", status_code=303)
+
+
+@app.post("/warm/stop")
+async def warm_stop():
+    import asyncio
+    from app.bot.warm_pool import warm_pool
+
+    def job():
+        warm_pool.stop()
+
+    loop = asyncio.get_event_loop()
+    await loop.run_in_executor(executor, job)
+    return RedirectResponse(url="/debug", status_code=303)
+
+
+@app.post("/warm/testar")
+async def warm_testar(
+    request: Request,
+    placa: str = Form(...),
+    data_ini: str = Form(""),
+    data_fim: str = Form(""),
+):
+    """Teste rápido de 1 placa na sessão permanente (volta para Veículos)."""
+    import asyncio
+
+    if not sitrax_configured():
+        return RedirectResponse(url="/debug", status_code=303)
+
+    d_ini = parse_date(data_ini) or date.today()
+    d_fim = parse_date(data_fim) or d_ini
+    placa_u = (placa or "").strip().upper()
+
+    def job():
+        from app.bot.warm_pool import warm_pool
+
+        return warm_pool.run_plate(placa_u, d_ini, d_fim, headless=True)
+
+    loop = asyncio.get_event_loop()
+    try:
+        result = await loop.run_in_executor(executor, job)
+        _store_result(result)
+    except Exception as e:
+        logger.exception("Warm testar %s: %s", placa_u, e)
+    return RedirectResponse(url="/debug", status_code=303)
 
 
 @app.post("/calibrar", response_class=HTMLResponse)
