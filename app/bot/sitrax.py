@@ -1782,26 +1782,36 @@ class SitraxBot:
             chip = d.execute_script(
                 self._js_is_purple()
                 + """
+                // 1) regex no body (mais confiável após AJAX)
+                var body = (document.body && document.body.innerText) || '';
+                var m = body.match(
+                  /(?:Date|Data)\\s*:\\s*(\\d{2}\\/\\d{2}\\/\\d{4})[^\\n]{0,50}?(?:Until|At[eé])\\s*(\\d{2}\\/\\d{2}\\/\\d{4})/i
+                );
+                if (m) return 'Date: ' + m[1] + ' Until ' + m[2];
+                m = body.match(/(?:Date|Data)\\s*:\\s*(\\d{2}\\/\\d{2}\\/\\d{4})\\s+\\d{2}:\\d{2}/i);
+                if (m) {
+                  // pode ter 2 datas no mesmo trecho
+                  var chunk = body.substring(body.indexOf(m[0]), body.indexOf(m[0])+80);
+                  var ds = chunk.match(/\\d{2}\\/\\d{2}\\/\\d{4}/g) || [];
+                  if (ds.length >= 2) return 'Date: ' + ds[0] + ' Until ' + ds[ds.length-1];
+                  return 'Date: ' + m[1];
+                }
                 var best = '', bestScore = 1e9;
-                var nodes = document.querySelectorAll('span,div,a,button,label,p,li,td,b,em');
+                var nodes = document.querySelectorAll('span,div,a,button,label,p,li,b,em');
                 for (var i=0;i<nodes.length;i++){
                   var el = nodes[i];
                   var t = norm(el.innerText || el.textContent);
                   if (!t || t.length < 8 || t.length > 160) continue;
                   if (!/\\d{2}\\/\\d{2}\\/\\d{4}/.test(t)) continue;
-                  // chip barra: Date:/Data:  OU  Until/Até entre datas  OU  roxo com 2 datas
                   var hasLabel = /\\bDate\\s*:/i.test(t) || /\\bData\\s*:/i.test(t);
                   var hasUntil = /Until|At[eé]/i.test(t);
-                  var dates = t.match(/\\d{2}\\/\\d{2}\\/\\d{4}/g) || [];
-                  if (!(hasLabel || hasUntil || (isPurple(el) && dates.length >= 1))) continue;
-                  if (/Ve[ií]culo\\s*:|Vehicle\\s*:/i.test(t)) continue;
-                  if (/Filtro\\s*Data|Date\\s*Filter|In[ií]cio\\s*:|Mostrando|Showing|Parked|Estacionado|GPS Date/i.test(t)
-                      && !hasLabel && !hasUntil) continue;
-                  if (/Registro|Register|Normal|Alert/i.test(t) && t.length > 60) continue;
+                  if (!(hasLabel || hasUntil)) continue;
+                  if (/Ve[ií]culo\\s*:|Vehicle\\s*:|Home\\s*:|Filter\\s*Date|Filtro\\s*Data/i.test(t)
+                      && !hasUntil) continue;
+                  if (/Mostrando|Showing|Parked|Estacionado|GPS Date|Registro|Register/i.test(t)) continue;
                   var r = el.getBoundingClientRect();
-                  if (r.width < 20 || r.height < 4) continue;
-                  if (r.top > 420) continue;
-                  var score = t.length + r.top * 0.01 - (isPurple(el) ? 50 : 0) - (hasUntil ? 20 : 0);
+                  if (r.width < 20 || r.height < 4 || r.top > 420) continue;
+                  var score = t.length + r.top * 0.01 - (hasUntil ? 40 : 0) - (isPurple(el) ? 30 : 0);
                   if (score < bestScore){ bestScore = score; best = t; }
                 }
                 return best;
@@ -3427,18 +3437,46 @@ class SitraxBot:
                 shot=True,
             )
 
-            # sucesso: popup fechou E (chip ok OU home/end estavam certos)
-            if popup_closed and (chip_ok or pop_ok):
+            # espera chip da barra atualizar (AJAX após Filter do popup)
+            if popup_closed and pop_ok and not chip_ok:
+                for _wait in range(8):
+                    self._sleep(0.45)
+                    chip_now = self._read_date_chip_text()
+                    chip_ok = self._date_chip_matches(data_ini, data_fim)
+                    if not chip_ok and chip_now:
+                        dates = re.findall(r"\d{2}/\d{2}/\d{4}", chip_now)
+                        if (
+                            len(dates) >= 2
+                            and dates[0] == ini_br
+                            and dates[-1] == fim_br
+                        ):
+                            chip_ok = True
+                    if chip_ok:
+                        break
                 logger.info(
-                    "Data filtro OK: %s → %s (chip=%r)",
+                    "Após Filter popup, chip=%r ok=%s", chip_now, chip_ok
+                )
+
+            # sucesso: popup fechou com Home/End certos
+            # (chip vazio ainda conta se Home/End estavam OK e popup fechou)
+            if popup_closed and pop_ok:
+                logger.info(
+                    "Data filtro OK: %s → %s (chip=%r chip_ok=%s)",
                     ini_br,
                     fim_br,
                     chip_now,
+                    chip_ok,
                 )
-                # Filter principal da barra (aplica pesquisa no Sitrax)
+                self._trace(
+                    "data_filtro_ok",
+                    f"{ini_br}→{fim_br} chip={chip_now!r}",
+                    shot=True,
+                )
+                # Filter da BARRA (laranja grande) — carrega a grade
                 try:
                     self.click_filtrar()
-                    self._wait_loader_gone(25)
+                    self._wait_loader_gone(30)
+                    self._sleep(0.8)
                 except Exception as e:
                     logger.warning("Filter barra após data: %s", e)
                 return
@@ -4015,8 +4053,12 @@ class SitraxBot:
         self.load_vehicle_list(placa=placa)
         self.select_vehicle_by_plate(placa)
         self.set_date_filter(data_ini, data_fim)
-        self.click_filtrar()
-        self._sleep(1.2)
+        # set_date_filter já clica Filter da barra no sucesso; reforço se preciso
+        try:
+            self.click_filtrar()
+        except Exception as e:
+            logger.warning("click_filtrar após data (warm): %s", e)
+        self._sleep(0.8)
 
     def prepare_next_fleet_plate(
         self,
@@ -4277,10 +4319,17 @@ class SitraxBot:
                 logger.warning(
                     "prepare frota %s tentativa %s: %s", placa_u, attempt + 1, e
                 )
+                # NÃO reabrir Posições se já estamos na tela — perde o filtro de data
                 if attempt == 0:
                     try:
-                        self.open_posicoes()
-                        self._sleep(1)
+                        if not self._on_posicoes_screen():
+                            self.open_posicoes()
+                            self._sleep(0.8)
+                        else:
+                            logger.info(
+                                "Já em Posições — retenta prepare sem reabrir menu"
+                            )
+                            self._sleep(0.5)
                     except Exception:
                         pass
                 continue
@@ -4478,8 +4527,11 @@ class SitraxBot:
         self.load_vehicle_list(placa=placa)
         self.select_vehicle_by_plate(placa)
         self.set_date_filter(data_ini, data_fim)
-        self.click_filtrar()
-        self._sleep(2)
+        try:
+            self.click_filtrar()
+        except Exception as e:
+            logger.warning("click_filtrar após data: %s", e)
+        self._sleep(1.2)
 
     def _click_export_cloud_icon(self) -> None:
         """Abre o menu Export (icone de nuvem ao lado do Filter)."""
