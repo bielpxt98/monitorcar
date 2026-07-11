@@ -218,10 +218,15 @@ class WarmPool:
         self._close_slot_unlocked(slot, keep_status=True)
         slot.status = "starting"
         slot.starting_since = time.time()
-        slot.message = f"Chrome {slot.slot_id + 1}: abrindo…"
+        t0 = slot.starting_since
+
+        def _elapsed() -> str:
+            return f"{int(time.time() - t0)}s"
+
+        slot.message = f"Chrome {slot.slot_id + 1}: abrindo… ({_elapsed()})"
         # Chrome 2 espera o 1 estabilizar (sessão Sitrax + RAM)
         if slot.slot_id > 0:
-            time.sleep(5.0)
+            time.sleep(2.0)
 
         tmp = Path(tempfile.mkdtemp(prefix=f"sitrax_warm{slot.slot_id + 1}_"))
         bot: Optional[Any] = None
@@ -233,29 +238,87 @@ class WarmPool:
                     quiet=True,
                     low_memory=True,  # sempre low mem no permanente
                 )
-                slot.message = f"Chrome {slot.slot_id + 1}: iniciando browser…"
+                slot.message = (
+                    f"Chrome {slot.slot_id + 1}: iniciando browser… ({_elapsed()})"
+                )
                 bot.start()
-                slot.message = f"Chrome {slot.slot_id + 1}: login…"
+                slot.message = f"Chrome {slot.slot_id + 1}: login… ({_elapsed()})"
                 bot.login()
-                time.sleep(1.2)
-            slot.message = f"Chrome {slot.slot_id + 1}: Posições…"
+            # PRONTO assim que chega em Posições (lista de placas pode vir depois)
+            slot.message = f"Chrome {slot.slot_id + 1}: Posições… ({_elapsed()})"
             bot.open_posicoes()
-            bot._sleep(0.8)
-            bot.open_vehicle_selector()
-            bot.load_vehicle_list()
-            n = bot._count_vehicle_items()
+            bot._sleep(0.25)
+
             slot.bot = bot
             slot.tmp = tmp
             slot.status = "ready"
             slot.starting_since = 0.0
-            slot.message = f"Chrome {slot.slot_id + 1}: Veículos ({n})"
+            slot.message = (
+                f"Chrome {slot.slot_id + 1}: PRONTO em Posições ({_elapsed()})"
+            )
             debug_session.step(
                 f"warm{slot.slot_id + 1}_pronto",
-                f"Chrome permanente {slot.slot_id + 1} em Veículos ({n} itens)",
+                f"Chrome permanente {slot.slot_id + 1} em Posições "
+                f"(aquecendo em {_elapsed()})",
                 ok=True,
                 screenshot=False,
             )
-            logger.info("Warm slot %s ready (%s veículos)", slot.slot_id + 1, n)
+            logger.info(
+                "Warm slot %s ready em %s (lista de placas em background)",
+                slot.slot_id + 1,
+                _elapsed(),
+            )
+
+            # lista veículos em background — não trava o “PRONTO”
+            def _load_plates() -> None:
+                try:
+                    if not slot.alive() or slot.bot is not bot:
+                        return
+                    slot.message = (
+                        f"Chrome {slot.slot_id + 1}: listando placas…"
+                    )
+                    bot.open_vehicle_selector()
+                    bot.load_vehicle_list()
+                    n = bot._count_vehicle_items()
+                    try:
+                        plates = bot.list_vehicles() if hasattr(bot, "list_vehicles") else []
+                        if plates:
+                            with self._lock:
+                                self._plates_cache = list(plates)
+                    except Exception:
+                        pass
+                    # fecha modal e fica pronto p/ pesquisa
+                    try:
+                        bot._d().execute_script(
+                            "if (typeof hideModalSearchVeiculo === 'function') "
+                            "hideModalSearchVeiculo();"
+                        )
+                    except Exception:
+                        pass
+                    if slot.bot is bot and slot.status in ("ready", "busy"):
+                        slot.message = (
+                            f"Chrome {slot.slot_id + 1}: Veículos ({n})"
+                        )
+                    logger.info(
+                        "Warm slot %s: lista com %s veículo(s)",
+                        slot.slot_id + 1,
+                        n,
+                    )
+                except Exception as e:
+                    logger.warning(
+                        "Warm slot %s lista placas (bg): %s", slot.slot_id + 1, e
+                    )
+                    if slot.bot is bot and slot.status == "ready":
+                        slot.message = (
+                            f"Chrome {slot.slot_id + 1}: PRONTO "
+                            f"(lista depois falhou: {e})"
+                        )
+
+            threading.Thread(
+                target=_load_plates,
+                name=f"warm-plates-{slot.slot_id + 1}",
+                daemon=True,
+            ).start()
         except Exception as e:
             slot.status = "error"
             slot.starting_since = 0.0

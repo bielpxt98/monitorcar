@@ -413,10 +413,12 @@ class SitraxBot:
 
     def login(self) -> None:
         d = self._d()
+        # quiet = warm pool / frota — menos espera
+        fast = bool(self.quiet or self.low_memory)
         logger.info("Abrindo login: %s", self.login_url)
         self._trace("login_abrir", f"Abrindo {self.login_url}")
         d.get(self.login_url)
-        self._sleep(1.5)
+        self._sleep(0.6 if fast else 1.5)
         self._trace("login_form", "Formulário de login carregado")
 
         # 3 campos: Cliente, Usuário, Senha
@@ -475,7 +477,7 @@ class SitraxBot:
         except TimeoutException:
             password.send_keys("\n") if password else None
 
-        self._sleep(2)
+        self._sleep(0.9 if fast else 2)
         try:
             self._w().until(
                 lambda drv: "login" not in drv.current_url.lower()
@@ -487,10 +489,11 @@ class SitraxBot:
             raise TimeoutException(
                 "Login não concluiu. Confira cliente/usuário/senha no .env"
             )
-        # dashboard demora a carregar menus
-        self._sleep(3)
+        # dashboard demora a carregar menus (menos no warm)
+        self._sleep(1.0 if fast else 3)
         logger.info("Login ok: %s", d.current_url)
-        self._save_debug("apos_login", f"Login OK — {d.current_url}")
+        if not self.quiet:
+            self._save_debug("apos_login", f"Login OK — {d.current_url}")
 
     def _js_click_id(self, element_id: str) -> bool:
         """Clica por id (funciona mesmo se o item estiver no menu lateral off-screen)."""

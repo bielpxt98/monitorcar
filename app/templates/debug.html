@@ -108,8 +108,8 @@
         <button type="submit">Pesquisar placa e voltar a Veículos</button>
       </form>
       <p class="hint" style="margin-top:.6rem;margin-bottom:0">
-        Espere status <strong>PRONTO</strong> antes do Todos.
-        Esta página atualiza sozinha a cada 8s enquanto o Chrome está abrindo.
+        Espere status <strong>PRONTO</strong> antes do Todos (~30–60s no 1º start).
+        Esta página atualiza sozinha a cada <strong>4s</strong> enquanto o Chrome abre.
         PDF do teste fica na <a href="/">home</a>.
       </p>
     </div>
@@ -117,9 +117,9 @@
       (function () {
         var w = "{{ warm.status or '' }}";
         var n = {{ warm.ready_count|default(0) }};
-        var total = {{ warm.slot_count|default(2) }};
+        var total = {{ warm.slot_count|default(1) }};
         if (w === 'starting' || w === 'partial' || (n > 0 && n < total)) {
-          setTimeout(function () { location.reload(); }, 8000);
+          setTimeout(function () { location.reload(); }, 4000);
         }
       })();
     </script>
