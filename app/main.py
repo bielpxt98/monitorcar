@@ -35,8 +35,8 @@ logging.basicConfig(
 logger = logging.getLogger("sitrax-bot")
 
 BASE = Path(__file__).resolve().parent
-# 2: após cancel, a thread morta pode limpar enquanto a nova já sobe
-executor = ThreadPoolExecutor(max_workers=2)
+# 4: warm (Chrome 1+2 bg) + job + cancel/reheat sem fila presa
+executor = ThreadPoolExecutor(max_workers=4)
 
 # rotas abertas sem login
 _PUBLIC_PREFIXES = (
@@ -322,6 +322,7 @@ def _run_job(modo: str, placa: str, d_ini: date, d_fim: date):
     if modo == "placa":
         if not placa_u:
             raise ValueError("Informe a placa do veículo.")
+        _JOB["message"] = f"Buscando {placa_u} no Sitrax…"
         return generate_vehicle_report_cloud(
             placa=placa_u,
             data_ini=d_ini,

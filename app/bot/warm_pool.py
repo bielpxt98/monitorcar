@@ -154,10 +154,44 @@ class WarmPool:
     # ——— lifecycle ———
 
     def start(self, headless: bool = True, low_memory: bool = True) -> dict:
-        """Garante o(s) Chrome(s) permanente(s) e liga o keep-alive."""
-        snap = self.ensure_both(headless=headless, low_memory=low_memory)
+        """
+        Garante Chrome 1 (ativo) já pronto e sobe Chrome 2 (standby) em
+        background — não bloqueia pesquisa de 1 placa enquanto o 2 abre.
+        """
+        try:
+            self._ensure_slot(0, headless=headless, low_memory=low_memory)
+        except Exception as e:
+            logger.exception("Falha ao aquecer Chrome 1: %s", e)
+            self.last_error = str(e)
+        if not self.started_at and any(s.alive() for s in self._slots):
+            self.started_at = datetime.now().strftime("%d/%m/%Y %H:%M:%S")
         self.start_keeper()
-        return snap
+        self._ensure_standby_bg(headless=headless, low_memory=low_memory)
+        return self.snapshot()
+
+    def _ensure_standby_bg(
+        self, headless: bool = True, low_memory: bool = True
+    ) -> None:
+        """Sobe Chrome 2 sem bloquear a pesquisa."""
+        if len(self._slots) < 2:
+            return
+        slot = self._slots[1]
+        if slot.alive() and slot.status in ("ready", "busy"):
+            return
+        if slot.status == "starting" and not slot.stuck_starting(90):
+            return
+
+        def _boot() -> None:
+            try:
+                self._ensure_slot(1, headless=headless, low_memory=low_memory)
+                logger.info("Chrome 2 (standby) pronto em background")
+            except Exception as e:
+                logger.warning("Chrome 2 standby (bg): %s", e)
+                self.last_error = str(e)
+
+        threading.Thread(
+            target=_boot, name="warm-standby-bg", daemon=True
+        ).start()
 
     def start_keeper(self, interval_sec: float = 45.0) -> None:
         """Religa sozinho se o Chrome cair (fora da frota)."""
@@ -192,17 +226,41 @@ class WarmPool:
     def stop_keeper(self) -> None:
         self._keeper_stop.set()
 
+    def ensure_primary(
+        self, headless: bool = True, low_memory: bool = True
+    ) -> dict:
+        """Só Chrome 1 — o que importa para 1 placa."""
+        try:
+            self._ensure_slot(0, headless=headless, low_memory=low_memory)
+        except Exception as e:
+            logger.exception("Falha ao aquecer Chrome 1: %s", e)
+            self.last_error = str(e)
+            raise
+        if not self.started_at and self._slots[0].alive():
+            self.started_at = datetime.now().strftime("%d/%m/%Y %H:%M:%S")
+        # standby segue em bg (não bloqueia)
+        self._ensure_standby_bg(headless=headless, low_memory=low_memory)
+        return self.snapshot()
+
     def ensure_both(self, headless: bool = True, low_memory: bool = True) -> dict:
-        """Garante Chrome 1 (ativo) + Chrome 2 (standby) em Veículos."""
-        for i in range(len(self._slots)):
+        """
+        Chrome 1 obrigatório; Chrome 2 best-effort (standby).
+        Não trava eternamente no 2 se ele falhar.
+        """
+        try:
+            self._ensure_slot(0, headless=headless, low_memory=low_memory)
+        except Exception as e:
+            logger.exception("Falha ao aquecer Chrome 1: %s", e)
+            self.last_error = str(e)
+            raise
+
+        if len(self._slots) > 1:
             try:
-                self._ensure_slot(i, headless=headless, low_memory=low_memory)
+                self._ensure_slot(1, headless=headless, low_memory=low_memory)
             except Exception as e:
-                logger.exception("Falha ao aquecer slot %s: %s", i + 1, e)
+                # standby opcional — frota roda só com o 1
+                logger.warning("Chrome 2 standby indisponível: %s", e)
                 self.last_error = str(e)
-                # Chrome 2 é standby: falha nele não impede o 1
-                if i + 1 < len(self._slots):
-                    time.sleep(3.0)
 
         if not self.started_at and any(s.alive() for s in self._slots):
             self.started_at = datetime.now().strftime("%d/%m/%Y %H:%M:%S")
@@ -434,8 +492,8 @@ class WarmPool:
             slot.message = "Desligado"
 
     def ensure_ready(self, headless: bool = True, low_memory: bool = True) -> None:
-        """Compat: pelo menos 1 pronto (preferência: os 2)."""
-        self.ensure_both(headless=headless, low_memory=low_memory)
+        """Pelo menos Chrome 1 pronto (standby em bg)."""
+        self.ensure_primary(headless=headless, low_memory=low_memory)
 
     def _return_slot_to_vehicles(self, slot: WarmSlot) -> None:
         if not slot.alive():
@@ -508,26 +566,22 @@ class WarmPool:
     # ——— 1 placa ———
 
     def _acquire_slot(self) -> WarmSlot:
-        """Pega um slot ready (round-robin)."""
-        self.ensure_both()
-        with self._lock:
-            n = len(self._slots)
-            for off in range(n):
-                idx = (self._rr + off) % n
-                slot = self._slots[idx]
-                with slot.lock:
-                    if slot.alive() and slot.status == "ready":
-                        slot.status = "busy"
-                        slot.message = f"Chrome {slot.slot_id + 1}: pesquisando…"
-                        self._rr = (idx + 1) % n
-                        return slot
-            # nenhum ready: força o primeiro
-            slot = self._slots[0]
-            with slot.lock:
+        """
+        Chrome 1 para pesquisa de 1 placa.
+        NÃO espera o standby (Chrome 2) — ele sobe em background.
+        """
+        self.ensure_primary()
+        slot = self._slots[0]
+        with slot.lock:
+            if not slot.alive() or slot.status not in ("ready", "busy"):
+                if slot.status == "starting" and not slot.stuck_starting(90):
+                    # outro thread ainda abrindo o 1 — espera um pouco
+                    pass
                 if not slot.alive():
                     self._boot_slot_unlocked(slot)
-                slot.status = "busy"
-                return slot
+            slot.status = "busy"
+            slot.message = f"Chrome {slot.slot_id + 1}: pesquisando…"
+            return slot
 
     def run_plate(
         self,
@@ -631,20 +685,33 @@ class WarmPool:
 
     def borrow_for_fleet(self) -> list[tuple[int, Any]]:
         """
-        Garante Chrome 1 (ativo) + Chrome 2 (standby) e marca busy.
+        Chrome 1 obrigatório; Chrome 2 se já estiver pronto (não espera min).
         Frota processa só no 1; o 2 fica standby até o 1 cair.
-        Retorna [(worker_id, bot), ...] — id 0 = ativo, id 1 = standby.
         """
         self._fleet_busy = True
-        self.ensure_both()
+        # 1 tem que estar pronto; 2 é best-effort rápido
+        self.ensure_primary()
+        # se standby já estiver quase pronto, tenta; senão frota segue só com 1
+        if len(self._slots) > 1:
+            s1 = self._slots[1]
+            if not (s1.alive() and s1.status in ("ready", "busy")):
+                # tenta subir rápido; se falhar, ok
+                try:
+                    self._ensure_slot(1, headless=True, low_memory=True)
+                except Exception as e:
+                    logger.warning("borrow fleet: standby falhou: %s", e)
+
         out: list[tuple[int, Any]] = []
         with self._lock:
             for slot in self._slots:
                 with slot.lock:
-                    if not slot.alive():
-                        try:
-                            self._boot_slot_unlocked(slot)
-                        except Exception:
+                    if not slot.alive() or slot.bot is None:
+                        if slot.slot_id == 0:
+                            try:
+                                self._boot_slot_unlocked(slot)
+                            except Exception:
+                                continue
+                        else:
                             continue
                     if slot.bot is None:
                         continue
