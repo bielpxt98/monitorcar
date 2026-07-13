@@ -785,14 +785,25 @@ class WarmPool:
                     slot.status = was
 
     def list_plates_on_bot(self, bot: Any) -> list[dict]:
-        """Lista placas usando um bot já emprestado (não devolve o slot)."""
+        """
+        Lista placas usando um bot já emprestado (não devolve o slot).
+        Limpa filtro de placa residual (pesquisa 1 veículo anterior).
+        """
         if not bot._on_posicoes_screen():
             bot.open_posicoes()
         bot._close_date_popup_if_open()
         if not bot._vehicle_modal_open():
             bot.open_vehicle_selector()
+        # load_vehicle_list() sem placa → limpa filtro e lista frota inteira
         bot.load_vehicle_list()
         vehicles = bot.list_plates()
+        # se ainda veio 1 só, tenta limpar de novo e recolher
+        if len(vehicles) <= 1:
+            try:
+                bot._clear_modal_plate_filter()
+                vehicles = bot.list_plates()
+            except Exception as e:
+                logger.warning("list_plates retry clear: %s", e)
         try:
             bot._d().execute_script(
                 "if (typeof hideModalSearchVeiculo === 'function') "
@@ -801,6 +812,7 @@ class WarmPool:
         except Exception:
             pass
         self.set_plates_cache(vehicles)
+        logger.info("list_plates_on_bot: %s placa(s)", len(vehicles))
         return vehicles
 
     def set_plates_cache(self, vehicles: list[dict]) -> None:

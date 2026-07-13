@@ -120,7 +120,7 @@ _JOB: dict = {
 }
 _JOB_ID_SEQ = 0
 # flash one-shot (POST /gerar → redirect /) para a URL voltar à home
-_FLASH: dict = {"error": None, "job_msg": None, "placa": None}
+_FLASH: dict = {"error": None, "job_msg": None, "placa": None, "modo": None}
 
 
 def job_cancelled() -> bool:
@@ -190,10 +190,12 @@ def _pop_flash() -> dict:
         "error": _FLASH.get("error"),
         "job_msg": _FLASH.get("job_msg"),
         "placa": _FLASH.get("placa"),
+        "modo": _FLASH.get("modo"),
     }
     _FLASH["error"] = None
     _FLASH["job_msg"] = None
     _FLASH["placa"] = None
+    _FLASH["modo"] = None
     return out
 
 
@@ -289,7 +291,17 @@ async def home(request: Request):
             "texto": _LAST_REPORT.get("texto"),
             "has_pdf": bool(_LAST_REPORT.get("pdf_bytes")),
             "pdf_name": _LAST_REPORT.get("pdf_filename"),
-            "placa": flash.get("placa") or _LAST_REPORT.get("placa") or "",
+            "placa": flash.get("placa") or (
+                "" if _LAST_REPORT.get("placa") == "FROTA"
+                else (_LAST_REPORT.get("placa") or "")
+            ),
+            "modo": flash.get("modo")
+            or _JOB.get("modo")
+            or (
+                "todos"
+                if _LAST_REPORT.get("placa") == "FROTA"
+                else "placa"
+            ),
             "job_msg": flash.get("job_msg"),
             "job_running": bool(_JOB.get("running")),
             "job_status": _JOB.get("message") or "",
@@ -313,13 +325,19 @@ def _run_job(modo: str, placa: str, d_ini: date, d_fim: date):
     if d_fim != d_ini:
         data_ref += f" a {d_fim.strftime('%d/%m/%Y')}"
 
+    modo_n = (modo or "placa").strip().lower()
     placa_u = (placa or "").strip().upper()
-    # se digitar TODOS/ALL no campo placa, trata como frota inteira
-    if placa_u in ("TODOS", "TODAS", "ALL", "FROTA", "*"):
-        modo = "todos"
+
+    # Todos SEMPRE ignora o campo placa (mesmo com PCU6A05 / qualquer texto)
+    if modo_n in ("todos", "todas", "all", "frota"):
+        modo_n = "todos"
+        placa_u = ""
+    elif placa_u in ("TODOS", "TODAS", "ALL", "FROTA", "*"):
+        # digitou palavra mágica no campo placa
+        modo_n = "todos"
         placa_u = ""
 
-    if modo == "placa":
+    if modo_n == "placa":
         if not placa_u:
             raise ValueError("Informe a placa do veículo.")
         _JOB["message"] = f"Buscando {placa_u} no Sitrax…"
@@ -362,6 +380,20 @@ def _run_job(modo: str, placa: str, d_ini: date, d_fim: date):
             if bot0 is None:
                 raise RuntimeError("Nenhum Chrome permanente disponível para frota.")
             vehicles = warm_pool.list_plates_on_bot(bot0)
+            # se Chrome 1 ainda trouxe poucas (filtro residual), tenta Chrome 2
+            if len(vehicles) <= 2 and len(borrowed) > 1:
+                try:
+                    bot1 = borrowed[1][1]
+                    more = warm_pool.list_plates_on_bot(bot1)
+                    if len(more) > len(vehicles):
+                        logger.info(
+                            "Lista Chrome 2 melhor: %s > %s — usando ela",
+                            len(more),
+                            len(vehicles),
+                        )
+                        vehicles = more
+                except Exception as e:
+                    logger.warning("Lista no standby: %s", e)
             vehicles = [
                 v
                 for v in vehicles
@@ -389,10 +421,12 @@ def _run_job(modo: str, placa: str, d_ini: date, d_fim: date):
                 ok=True,
                 screenshot=False,
             )
+            n_fleet = len(vehicles)
             _JOB["message"] = (
-                f"Frota: 0/{len(vehicles)} — Chrome 1"
+                f"Frota: 0/{n_fleet} veículos — Chrome 1"
                 f"{' + standby' if n_chrome > 1 else ''}…"
             )
+            _JOB["fleet_count"] = n_fleet
 
             def _msg(m: str) -> None:
                 _JOB["message"] = m
@@ -477,7 +511,17 @@ def _run_job(modo: str, placa: str, d_ini: date, d_fim: date):
             pdf_writer.write(out)
             pdf_bytes = out.getvalue()
 
-        texto = "\n\n".join(textos) if textos else "Nenhum veículo processado."
+        placas_done = [r.placa for r in plate_results]
+        header = (
+            f"🚛 Frota: {len(plate_results)} veículo(s) · "
+            f"{total_pontos} pontos · {data_ref}\n"
+            f"Placas: {', '.join(placas_done)}"
+        )
+        texto = (
+            header
+            + "\n\n"
+            + ("\n\n".join(textos) if textos else "Nenhum veículo processado.")
+        )
         debug_session.finish_run(ok=True)
         return ReportResult(
             placa="FROTA",
@@ -615,10 +659,32 @@ def _start_bg_job(modo: str, placa: str, d_ini: date, d_fim: date) -> bool:
                 _JOB["done"] = True
                 return
             _store_result(result)
-            _JOB["message"] = (
-                f"Concluído — {result.placa} ({result.pontos} pontos). "
-                "Baixe o PDF na home."
-            )
+            if result.placa == "FROTA":
+                n_ok = _JOB.get("fleet_count") or 0
+                if not n_ok and result.texto:
+                    # "🚛 Frota: N veículo(s)"
+                    import re as _re
+
+                    m = _re.search(
+                        r"Frota:\s*(\d+)\s*veículo", result.texto or "", _re.I
+                    )
+                    if m:
+                        n_ok = int(m.group(1))
+                if n_ok:
+                    _JOB["message"] = (
+                        f"Concluído — FROTA ({n_ok} veículos, "
+                        f"{result.pontos} pontos). Baixe o PDF / Visualizar."
+                    )
+                else:
+                    _JOB["message"] = (
+                        f"Concluído — FROTA ({result.pontos} pontos). "
+                        "Baixe o PDF / Visualizar."
+                    )
+            else:
+                _JOB["message"] = (
+                    f"Concluído — {result.placa} ({result.pontos} pontos). "
+                    "Baixe o PDF na home."
+                )
             _JOB["done"] = True
         except JobCancelled as e:
             logger.info("Job cancelado: %s", e)
@@ -703,17 +769,23 @@ async def gerar(
     error = None
     job_msg = None
     placa_u = (placa or "").strip().upper()
+    modo_n = (modo or "placa").strip().lower()
+
+    # Todos ignora placa digitada (campo vira irrelevante)
+    if modo_n in ("todos", "todas", "all", "frota"):
+        modo_n = "todos"
+        placa_u = ""
+    elif placa_u in ("TODOS", "TODAS", "ALL", "FROTA", "*"):
+        modo_n = "todos"
+        placa_u = ""
 
     if not sitrax_configured():
         error = "Servidor sem credenciais Sitrax (.env). Contate o administrador."
-    elif modo == "placa" and not placa.strip():
+    elif modo_n == "placa" and not placa_u:
         error = "Informe a placa do veículo (ou escolha Todos)."
     else:
         d_ini = parse_date(data_ini) or date.today()
         d_fim = parse_date(data_fim) or d_ini
-        modo_n = (modo or "placa").lower()
-        if placa_u in ("TODOS", "TODAS", "ALL", "FROTA", "*"):
-            modo_n = "todos"
 
         if _JOB.get("running"):
             job_msg = (
@@ -721,7 +793,7 @@ async def gerar(
                 f"{_JOB.get('message')}. Use Cancelar para parar e buscar outra."
             )
         else:
-            # salva placa pesquisada (botão i / próximas buscas)
+            # salva placa só em modo 1 veículo
             if placa_u and modo_n == "placa":
                 try:
                     from app.bot.warm_pool import warm_pool
@@ -729,12 +801,19 @@ async def gerar(
                     warm_pool.remember_plate(placa_u)
                 except Exception:
                     pass
-            ok = _start_bg_job(modo_n, placa, d_ini, d_fim)
+            # Todos: não manda placa para o job (evita confusão / filtro residual)
+            ok = _start_bg_job(
+                modo_n,
+                placa_u if modo_n == "placa" else "",
+                d_ini,
+                d_fim,
+            )
             if ok:
                 if modo_n == "todos":
                     job_msg = (
-                        "Frota iniciada (Chrome 1 + standby). "
-                        "Acompanhe em /debug. Pode cancelar a qualquer momento."
+                        "Frota iniciada (ignora placa digitada). "
+                        "Lista completa no Sitrax → Chrome 1 + standby. "
+                        "Acompanhe em /debug."
                     )
                 else:
                     job_msg = (
@@ -746,7 +825,9 @@ async def gerar(
 
     _FLASH["error"] = error
     _FLASH["job_msg"] = job_msg
-    _FLASH["placa"] = placa_u if placa_u else None
+    # em Todos não devolve placa no form; em 1 veículo mantém a digitada
+    _FLASH["placa"] = placa_u if (placa_u and modo_n == "placa") else None
+    _FLASH["modo"] = modo_n
     # URL volta para a home (não fica em /gerar)
     return RedirectResponse(url="/", status_code=303)
 

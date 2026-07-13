@@ -226,19 +226,21 @@
       <form method="post" action="/gerar" id="form-auto">
         <div class="mode-grid">
           <label class="mode">
-            <input type="radio" name="modo" value="placa" {% if not modo or modo == 'placa' %}checked{% endif %} />
+            <input type="radio" name="modo" value="placa" id="modo-placa"
+                   {% if not modo or modo == 'placa' %}checked{% endif %} />
             <strong>1 veículo</strong>
             <span>Só a placa abaixo</span>
           </label>
           <label class="mode">
-            <input type="radio" name="modo" value="todos" {% if modo == 'todos' %}checked{% endif %} />
+            <input type="radio" name="modo" value="todos" id="modo-todos"
+                   {% if modo == 'todos' %}checked{% endif %} />
             <strong>Todos</strong>
-            <span>Chrome 1 + standby</span>
+            <span>Ignora placa · frota inteira</span>
           </label>
         </div>
 
         <div class="label-row">
-          <label for="placa">Placa (1 veículo) — toque no <em>i</em> p/ lista salva</label>
+          <label for="placa" id="placa-label">Placa (1 veículo) — toque no <em>i</em> p/ lista salva</label>
           <button type="button" class="btn-info" id="btn-plates-info" title="Placas salvas da frota" aria-label="Listar placas">i</button>
         </div>
         <input id="placa" name="placa" type="text" placeholder="Ex: PCE7B03"
@@ -333,6 +335,37 @@
     }
     wire('form-auto', 'btn-auto', 'Gerando…');
     wire('form-pdf', 'btn-pdf', 'Gerando…');
+
+    // Todos = ignora placa (desabilita visualmente o campo)
+    (function modoTodosIgnorePlate() {
+      const rPlaca = document.getElementById('modo-placa');
+      const rTodos = document.getElementById('modo-todos');
+      const inp = document.getElementById('placa');
+      const lab = document.getElementById('placa-label');
+      const form = document.getElementById('form-auto');
+      if (!rTodos || !inp) return;
+      function sync() {
+        const todos = rTodos.checked;
+        inp.disabled = todos;
+        inp.style.opacity = todos ? '0.45' : '1';
+        if (lab) {
+          lab.innerHTML = todos
+            ? 'Placa <em>ignorada</em> no modo Todos (frota inteira)'
+            : 'Placa (1 veículo) — toque no <em>i</em> p/ lista salva';
+        }
+      }
+      rPlaca && rPlaca.addEventListener('change', sync);
+      rTodos.addEventListener('change', sync);
+      sync();
+      // ao enviar Todos, não manda placa (disabled já remove do form em alguns browsers;
+      // garante: reabilita vazio no submit se todos)
+      form && form.addEventListener('submit', () => {
+        if (rTodos.checked) {
+          inp.disabled = false;
+          inp.value = '';
+        }
+      });
+    })();
 
     (function platePicker() {
       const btn = document.getElementById('btn-plates-info');

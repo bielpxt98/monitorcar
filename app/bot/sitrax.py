@@ -1117,6 +1117,101 @@ class SitraxBot:
             logger.warning("swClick filtrar falhou: %s", e)
         return False
 
+    def _modal_plate_input(self):
+        """Input de filtro de placa do modal de veículos."""
+        d = self._d()
+        for sel in (
+            "input[id='formModalSearchVeiculo:itCveiPlaca']",
+            "input[id*='itCveiPlaca']",
+            "#itFiltroCveiPlaca input",
+            "input[id*='Placa']",
+        ):
+            try:
+                for el in d.find_elements(By.CSS_SELECTOR, sel):
+                    return el
+            except Exception:
+                continue
+        return None
+
+    def _click_modal_vehicle_filter(self) -> bool:
+        """Clica Filtrar / lupa do modal de veículos."""
+        d = self._d()
+        try:
+            d.execute_script(
+                "if (typeof swClick === 'function') "
+                "swClick('formModalSearchVeiculo:btnFiltrarVeiculo');"
+            )
+            return True
+        except Exception:
+            pass
+        for xp in (
+            "//button[contains(@id,'btnFiltrarVeiculo')]",
+            "//button[contains(.,'Filter') or contains(.,'Filtrar')]",
+            "//a[contains(@id,'btnFiltrarVeiculo')]",
+        ):
+            try:
+                for btn in d.find_elements(By.XPATH, xp):
+                    d.execute_script("arguments[0].click();", btn)
+                    return True
+            except Exception:
+                continue
+        try:
+            return bool(self._click_placa_lupa_preta())
+        except Exception:
+            return False
+
+    def _clear_modal_plate_filter(self) -> bool:
+        """
+        Limpa o filtro de placa do modal e recarrega a lista COMPLETA.
+        Crucial após pesquisa de 1 placa: o modal fica filtrado e a frota
+        veria só 1 veículo.
+        """
+        d = self._d()
+        try:
+            inp = self._modal_plate_input()
+            if inp is None:
+                logger.warning("clear modal: input de placa não achado")
+                return False
+            cur = ""
+            try:
+                cur = (inp.get_attribute("value") or "").strip()
+            except Exception:
+                pass
+            d.execute_script(
+                "arguments[0].scrollIntoView({block:'center'});"
+                "arguments[0].value='';"
+                "arguments[0].dispatchEvent(new Event('input',{bubbles:true}));"
+                "arguments[0].dispatchEvent(new Event('change',{bubbles:true}));"
+                "arguments[0].dispatchEvent(new Event('keyup',{bubbles:true}));",
+                inp,
+            )
+            try:
+                inp.clear()
+                # Ctrl+A + Delete (alguns JSF não respeitam .clear)
+                from selenium.webdriver.common.keys import Keys
+
+                inp.send_keys(Keys.CONTROL, "a")
+                inp.send_keys(Keys.DELETE)
+            except Exception:
+                pass
+            self._click_modal_vehicle_filter()
+            self._wait_loader_gone(30)
+            self._sleep(0.8)
+            n = self._count_vehicle_items()
+            self._trace(
+                "modal_filtro_limpo",
+                f"Filtro de placa limpo (antes={cur or '—'}) → {n} item(ns)",
+                ok=n >= 1,
+                shot=False,
+            )
+            logger.info(
+                "Modal frota: filtro limpo (antes=%r) → %s veículo(s)", cur, n
+            )
+            return True
+        except Exception as e:
+            logger.warning("clear modal plate filter: %s", e)
+            return False
+
     def _filter_modal_by_plate(self, placa_u: str) -> bool:
         """Digita a placa no filtro do modal e clica Filtrar (JSF)."""
         d = self._d()
@@ -1124,22 +1219,7 @@ class SitraxBot:
         if not placa_u:
             return False
         try:
-            inp = None
-            for sel in (
-                "input[id='formModalSearchVeiculo:itCveiPlaca']",
-                "input[id*='itCveiPlaca']",
-                "input[id*='Placa']",
-            ):
-                try:
-                    els = d.find_elements(By.CSS_SELECTOR, sel)
-                    for el in els:
-                        if el.is_displayed() or True:
-                            inp = el
-                            break
-                except Exception:
-                    continue
-                if inp is not None:
-                    break
+            inp = self._modal_plate_input()
             if inp is None:
                 return False
             d.execute_script(
@@ -1156,31 +1236,7 @@ class SitraxBot:
                 inp.send_keys(placa_u)
             except Exception:
                 pass
-            # botão filtrar do modal
-            clicked = False
-            try:
-                d.execute_script(
-                    "if (typeof swClick === 'function') "
-                    "swClick('formModalSearchVeiculo:btnFiltrarVeiculo');"
-                )
-                clicked = True
-            except Exception:
-                pass
-            if not clicked:
-                for xp in (
-                    "//button[contains(@id,'btnFiltrarVeiculo')]",
-                    "//button[contains(.,'Filter') or contains(.,'Filtrar')]",
-                    "//a[contains(@id,'btnFiltrarVeiculo')]",
-                ):
-                    try:
-                        for btn in d.find_elements(By.XPATH, xp):
-                            d.execute_script("arguments[0].click();", btn)
-                            clicked = True
-                            break
-                    except Exception:
-                        continue
-                    if clicked:
-                        break
+            self._click_modal_vehicle_filter()
             self._wait_loader_gone(30)
             self._sleep(0.8)
             return True
@@ -1338,6 +1394,19 @@ class SitraxBot:
         )
 
         if not placa_u:
+            # Frota / list_plates: SEMPRE limpa filtro residual (1 placa anterior)
+            # senão o modal mostra só a última placa filtrada (ex.: 1 de 13).
+            self._clear_modal_plate_filter()
+            n1 = self._count_vehicle_items()
+            if n1 < 1:
+                _ensure_list_or_lupa()
+                n1 = self._count_vehicle_items()
+            self._trace(
+                "lista_frota_completa",
+                f"Lista completa da frota: {n1} veículo(s)",
+                ok=n1 >= 1,
+                shot=True,
+            )
             return
 
         # Com placa alvo: filtrar SEMPRE (lista suja da placa anterior)
