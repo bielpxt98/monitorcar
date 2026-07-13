@@ -1,9 +1,9 @@
 """
-Frota com 1 Chrome permanente (estável / menos perda de pontos).
+Frota com Chrome 1 ativo + Chrome 2 em standby.
 
-- Todas as placas em sequência no mesmo browser.
+- Todas as placas em sequência no Chrome 1 (estável).
+- Chrome 2 fica em Veículos; só assume se o 1 cair (tab crashed / sessão).
 - Entre placas: X no chip → próxima (sem login).
-- Só reabre se tab crashed / sessão morta.
 - Placas que falharam por crash são re-tentadas no fim.
 """
 
@@ -19,7 +19,7 @@ from typing import Any, Optional
 
 logger = logging.getLogger(__name__)
 
-# 1 worker = sem briga de RAM; total de pontos mais completo
+# 1 worker processa a frota; o 2º Chrome é só failover
 DEFAULT_WORKERS = 1
 RESTART_ONLY_ON_CRASH = True
 
@@ -92,8 +92,13 @@ def _run_one_worker(
     on_bot_replaced: Optional[Any] = None,
     start_barrier: Optional[threading.Barrier] = None,
     cancel_check: Optional[Any] = None,
+    standby_bot: Any = None,
+    on_standby_used: Optional[Any] = None,
 ) -> list[PlateResult]:
-    """Um Chrome processa sua fatia; preferência: bot permanente (keep_alive)."""
+    """
+    Chrome principal processa a frota.
+    standby_bot: Chrome 2 em Veículos — só entra se o principal morrer.
+    """
     import time as _time
 
     from app.bot.sitrax import SitraxBot
@@ -118,11 +123,12 @@ def _run_one_worker(
 
     placas = [v["placa"] for _, v in assigned]
     logger.info(
-        "Worker %s: %s placa(s) → %s (permanente=%s)",
+        "Worker %s: %s placa(s) → %s (permanente=%s, standby=%s)",
         worker_id + 1,
         len(assigned),
         ", ".join(placas[:12]),
         bool(existing_bot),
+        bool(standby_bot),
     )
     with progress_lock:
         progress[worker_id] = {
@@ -133,8 +139,48 @@ def _run_one_worker(
         }
 
     bot: Optional[Any] = existing_bot if existing_bot is not None else None
+    _standby: Optional[Any] = standby_bot
+    _using_standby = False
+    # bots "permanentes" que não devem ser fechados no finally
+    _keep_bots: list[Any] = [b for b in (existing_bot, standby_bot) if b is not None]
     sub_tmp = download_dir / f"w{worker_id}"
     sub_tmp.mkdir(parents=True, exist_ok=True)
+
+    def _promote_standby() -> Optional[Any]:
+        """Se o ativo morreu, assume o Chrome 2 (standby)."""
+        nonlocal bot, _standby, _using_standby
+        if _standby is None:
+            return None
+        try:
+            if not _standby.alive():
+                logger.warning("Standby Chrome morto — não pode assumir")
+                _standby = None
+                return None
+        except Exception:
+            _standby = None
+            return None
+        logger.info("Chrome 1 caiu — promovendo Chrome 2 (standby) para a frota")
+        debug_session.step(
+            "standby_promovido",
+            "Chrome 2 (standby) assumiu a frota após queda do Chrome 1",
+            ok=True,
+            screenshot=False,
+        )
+        bot = _standby
+        _using_standby = True
+        _standby = None
+        if on_standby_used:
+            try:
+                on_standby_used(bot)
+            except Exception:
+                pass
+        if on_bot_replaced:
+            try:
+                # marca slot 0 com o bot promovido (continuidade do pool)
+                on_bot_replaced(worker_id, bot)
+            except Exception:
+                pass
+        return bot
 
     def _start() -> Any:
         nonlocal bot
@@ -142,9 +188,10 @@ def _run_one_worker(
         if bot is not None:
             try:
                 if bot.alive():
+                    label = "standby" if _using_standby else "ativo"
                     debug_session.step(
                         f"worker{worker_id+1}_reuso",
-                        f"Chrome {worker_id+1} permanente reutilizado — "
+                        f"Chrome {worker_id+1} ({label}) reutilizado — "
                         f"{len(assigned)} placa(s): {', '.join(placas[:8])}",
                         ok=True,
                         screenshot=False,
@@ -152,6 +199,11 @@ def _run_one_worker(
                     return bot
             except Exception:
                 pass
+        # Preferência: promover standby antes de cold start
+        promoted = _promote_standby()
+        if promoted is not None:
+            return promoted
+
         b = SitraxBot(
             headless=True,
             download_dir=sub_tmp,
@@ -167,7 +219,7 @@ def _run_one_worker(
         b._sleep(0.5)
         debug_session.step(
             f"worker{worker_id+1}_pronto",
-            f"Chrome {worker_id+1} logado em Posições — "
+            f"Chrome {worker_id+1} cold start (standby indisponível) — "
             f"{len(assigned)} placa(s): {', '.join(placas[:8])}",
             ok=True,
             screenshot=False,
@@ -184,7 +236,7 @@ def _run_one_worker(
         nonlocal bot
         if bot is None:
             return
-        if keep_alive and bot is existing_bot:
+        if keep_alive and any(bot is k for k in _keep_bots):
             return
         try:
             bot.close()
@@ -408,18 +460,20 @@ def _run_one_worker(
                     if _is_crash(e) and attempts < 2:
                         debug_session.step(
                             f"w{worker_id+1}_crash_{pl}",
-                            f"Chrome {worker_id+1} caiu em {pl}; reiniciando",
+                            f"Chrome caiu em {pl}; tentando standby ou reinício",
                             ok=False,
                             screenshot=False,
                         )
-                        # fecha morto e sobe de novo (atualiza pool se permanente)
-                        if bot is not None:
+                        dead = bot
+                        bot = None
+                        existing_bot = None
+                        if dead is not None:
                             try:
-                                bot.close()
+                                dead.close()
                             except Exception:
                                 pass
-                            bot = None
-                        existing_bot = None  # força cold start
+                            _keep_bots[:] = [k for k in _keep_bots if k is not dead]
+                        # _start promove standby se existir, senão cold start
                         bot = _start()
                         continue
                     results.append(
@@ -441,13 +495,15 @@ def _run_one_worker(
                         screenshot=False,
                     )
                     if _is_crash(e):
-                        if bot is not None:
+                        dead = bot
+                        bot = None
+                        existing_bot = None
+                        if dead is not None:
                             try:
-                                bot.close()
+                                dead.close()
                             except Exception:
                                 pass
-                            bot = None
-                        existing_bot = None
+                            _keep_bots[:] = [k for k in _keep_bots if k is not dead]
                         try:
                             bot = _start()
                         except Exception:
@@ -455,7 +511,7 @@ def _run_one_worker(
                     break
     finally:
         if not keep_alive:
-            if bot is not None:
+            if bot is not None and not any(bot is k for k in _keep_bots):
                 try:
                     bot.close()
                 except Exception:
@@ -479,13 +535,14 @@ def run_fleet_parallel(
     cancel_check: Optional[Any] = None,
 ) -> list[PlateResult]:
     """
-    1 Chrome sequencial (estável).
-    existing_bots: bots permanentes [(id, bot), ...] — sem login de novo.
+    Chrome 1 processa a frota em sequência.
+    existing_bots: [(0, bot_ativo), (1, bot_standby), ...]
+    Chrome 2 só entra se o 1 cair.
     cancel_check: callable() -> bool — para entre placas se True.
     """
     from app.bot import debug_session
 
-    n_workers = max(1, min(int(n_workers), 1))  # frota estável = 1 Chrome
+    n_workers = max(1, min(int(n_workers), 1))  # 1 processa; 2 = standby
     buckets = partition_round_robin(vehicles, n_workers)
 
     bot_by_id: dict[int, Any] = {}
@@ -493,16 +550,24 @@ def run_fleet_parallel(
         for wid, b in existing_bots:
             bot_by_id[int(wid)] = b
 
+    primary_bot = bot_by_id.get(0)
+    standby = bot_by_id.get(1)
+    # se só veio o standby (Chrome 1 morto), ele vira principal
+    if primary_bot is None and standby is not None:
+        primary_bot = standby
+        standby = None
+
     active = [(i, b) for i, b in enumerate(buckets) if b]
     if not active:
         return []
 
+    sb_label = " + Chrome 2 standby" if standby is not None else ""
     debug_session.step(
         "frota_workers",
-        f"{len(active)} Chrome(s) permanentes // round-robin: "
+        f"Chrome 1 ativo{sb_label} — "
         + " | ".join(
-            f"W{i+1}=[{', '.join(v['placa'] for _, v in b[:6])}"
-            f"{'…' if len(b) > 6 else ''}]"
+            f"[{', '.join(v['placa'] for _, v in b[:8])}"
+            f"{'…' if len(b) > 8 else ''}]"
             for i, b in active
         ),
         ok=True,
@@ -512,6 +577,13 @@ def run_fleet_parallel(
     progress: dict = {}
     progress_lock = threading.Lock()
     all_results: list[PlateResult] = []
+    standby_holder: list[Any] = [standby]  # mutável se promovido
+
+    def _on_standby_used(bot: Any) -> None:
+        standby_holder[0] = None
+        bot_by_id[0] = bot
+        if job_message_cb:
+            job_message_cb("Frota: Chrome 2 (standby) assumiu após queda do 1…")
 
     def _tick():
         if not job_message_cb:
@@ -529,7 +601,7 @@ def run_fleet_parallel(
                 f"{prefix}Frota {total_done}/{total} — " + " · ".join(parts)
             )
 
-    # Largada simultânea: os N workers esperam uns aos outros e saem juntos
+    # 1 worker só — barreira de 1 é no-op útil
     start_barrier = threading.Barrier(len(active), timeout=180)
 
     with ThreadPoolExecutor(max_workers=len(active)) as pool:
@@ -544,15 +616,16 @@ def run_fleet_parallel(
                 download_dir,
                 progress,
                 progress_lock,
-                bot_by_id.get(wid),
+                primary_bot if wid == 0 else bot_by_id.get(wid),
                 keep_alive,
                 on_bot_replaced,
                 start_barrier,
                 cancel_check,
+                standby if wid == 0 else None,
+                _on_standby_used if wid == 0 else None,
             ): wid
             for wid, bucket in active
         }
-        # poll progress while waiting
         import time
 
         pending = set(futs.keys())
@@ -582,13 +655,11 @@ def run_fleet_parallel(
     all_results.sort(key=lambda r: r.order)
 
     # Reprocessa placas que falharam por crash/erro (não vazio legítimo 0 pts)
-    failed = [
-        r
+    failed_orders = {
+        r.order
         for r in all_results
-        if (not r.ok) and r.pontos == 0 and "erro" in (r.texto or "").lower()
-    ]
-    # também: ok=False com error preenchido
-    failed_orders = {r.order for r in all_results if not r.ok and r.error and "0 posições" not in (r.error or "")}
+        if not r.ok and r.error and "0 posições" not in (r.error or "")
+    }
     retry_vehicles = [
         (i, v)
         for i, v in enumerate(vehicles)
@@ -598,7 +669,6 @@ def run_fleet_parallel(
             for r in all_results
         )
     ]
-    # dedupe
     seen_o = set()
     retry_list: list[tuple[int, dict]] = []
     for item in retry_vehicles:
@@ -606,7 +676,7 @@ def run_fleet_parallel(
             seen_o.add(item[0])
             retry_list.append(item)
 
-    if retry_list and existing_bots:
+    if retry_list:
         debug_session.step(
             "frota_retry_falhas",
             f"Reprocessando {len(retry_list)} placa(s) que falharam: "
@@ -614,8 +684,8 @@ def run_fleet_parallel(
             ok=True,
             screenshot=False,
         )
-        # 1 worker com o bot 0 (ou cold)
-        bot0 = bot_by_id.get(0) or (existing_bots[0][1] if existing_bots else None)
+        bot0 = bot_by_id.get(0) or primary_bot
+        sb = standby_holder[0]
         retry_results = _run_one_worker(
             0,
             retry_list,
@@ -628,11 +698,13 @@ def run_fleet_parallel(
             bot0,
             keep_alive,
             on_bot_replaced,
-            None,  # sem barreira
+            None,
+            cancel_check,
+            sb,
+            _on_standby_used,
         )
         by_order = {r.order: r for r in all_results}
         for r in retry_results:
-            # só substitui se o retry foi melhor (mais pontos ou ok)
             old = by_order.get(r.order)
             if old is None or (r.ok and (not old.ok or r.pontos >= old.pontos)):
                 by_order[r.order] = r

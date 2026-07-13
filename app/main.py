@@ -70,7 +70,7 @@ def check_app_credentials(user: str, password: str) -> bool:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """
-    Ao subir: 1 Chrome permanente em Veículos + keeper que religa sozinho.
+    Ao subir: Chrome 1 (ativo) + Chrome 2 (standby) em Veículos + keeper.
     Não precisa clicar em “Ligar” no /debug.
     """
     if sitrax_configured():
@@ -80,7 +80,7 @@ async def lifespan(app: FastAPI):
                 from app.bot.warm_pool import warm_pool
 
                 logger.info(
-                    "Auto-start: 1 Chrome permanente (login → Veículos)…"
+                    "Auto-start: Chrome 1 ativo + Chrome 2 standby → Veículos…"
                 )
                 snap = warm_pool.start(headless=True, low_memory=True)
                 logger.info("Pool permanente: %s", snap.get("message"))
@@ -329,7 +329,7 @@ def _run_job(modo: str, placa: str, d_ini: date, d_fim: date):
             headless=True,
         )
 
-    # ——— TODOS: 1 Chrome permanente (estável; mais pontos completos) ———
+    # ——— TODOS: Chrome 1 ativo + Chrome 2 standby (só se 1 cair) ———
     from app.bot.summary_pdf import build_summary_pdf_bytes, safe_filename
     from app.bot.fleet_workers import run_fleet_parallel, DEFAULT_WORKERS
     from app.bot.warm_pool import warm_pool
@@ -343,14 +343,19 @@ def _run_job(modo: str, placa: str, d_ini: date, d_fim: date):
     textos: list[str] = []
     pdf_writer = PdfWriter()
     total_pontos = 0
-    N_WORKERS = DEFAULT_WORKERS  # 1
+    N_WORKERS = DEFAULT_WORKERS  # 1 processa; 2 = standby
 
     try:
         with TempWorkspace(prefix="sitrax_frota_") as tmp:
             if job_cancelled():
                 raise JobCancelled("Cancelado pelo usuário")
             borrowed = warm_pool.borrow_for_fleet()
-            _JOB["message"] = "Frota: listando placas (1 Chrome estável)…"
+            n_chrome = len(borrowed)
+            _JOB["message"] = (
+                f"Frota: listando placas "
+                f"({n_chrome} Chrome(s): 1 ativo"
+                f"{' + standby' if n_chrome > 1 else ''})…"
+            )
 
             bot0 = borrowed[0][1] if borrowed else None
             if bot0 is None:
@@ -376,13 +381,17 @@ def _run_job(modo: str, placa: str, d_ini: date, d_fim: date):
 
             debug_session.step(
                 "frota_lista",
-                f"Frota: {len(vehicles)} veículo(s) — 1 Chrome permanente "
-                f"(sequencial, X entre placas, reinicia só se travar): "
+                f"Frota: {len(vehicles)} veículo(s) — Chrome 1 sequencial"
+                f"{' + Chrome 2 standby' if n_chrome > 1 else ''} "
+                f"(X entre placas; standby só se o 1 cair): "
                 + ", ".join(v["placa"] for v in vehicles[:25]),
                 ok=True,
                 screenshot=False,
             )
-            _JOB["message"] = f"Frota: 0/{len(vehicles)} — 1 Chrome estável…"
+            _JOB["message"] = (
+                f"Frota: 0/{len(vehicles)} — Chrome 1"
+                f"{' + standby' if n_chrome > 1 else ''}…"
+            )
 
             def _msg(m: str) -> None:
                 _JOB["message"] = m
@@ -711,19 +720,25 @@ async def gerar(
                 f"{_JOB.get('message')}. Use Cancelar para parar e buscar outra."
             )
         else:
+            # salva placa pesquisada (botão i / próximas buscas)
+            if placa_u and modo_n == "placa":
+                try:
+                    from app.bot.warm_pool import warm_pool
+
+                    warm_pool.remember_plate(placa_u)
+                except Exception:
+                    pass
             ok = _start_bg_job(modo_n, placa, d_ini, d_fim)
             if ok:
                 if modo_n == "todos":
                     job_msg = (
-                        "Frota iniciada em segundo plano. "
-                        "Acompanhe em /debug. Pode cancelar a qualquer momento "
-                        "para buscar outra placa. A página atualiza sozinha."
+                        "Frota iniciada (Chrome 1 + standby). "
+                        "Acompanhe em /debug. Pode cancelar a qualquer momento."
                     )
                 else:
                     job_msg = (
                         f"Buscando {placa_u or 'placa'}… "
-                        "Pode cancelar se demorar e buscar outra. "
-                        "A página atualiza sozinha."
+                        "Pode cancelar se demorar. A página atualiza sozinha."
                     )
             else:
                 job_msg = "Não foi possível iniciar a pesquisa (ocupado)."
@@ -738,20 +753,40 @@ async def gerar(
 @app.get("/api/placas")
 async def api_placas():
     """
-    Lista placas conhecidas (cache da última listagem no Sitrax).
-    Usado pelo botão (i) na home para o usuário escolher e pesquisar.
+    Placas salvas (disco + cache) para o botão (i).
+    Persistidas ao listar frota / pesquisar; não somem ao reiniciar o processo.
     """
     plates: list = []
     source = "empty"
     try:
-        from app.bot.warm_pool import warm_pool
+        from app.bot.plates_store import load_plates
 
-        plates = warm_pool.get_plates_cache()
+        plates = load_plates()
         if plates:
-            source = "cache"
+            source = "disk"
     except Exception:
         pass
-    # fallback: placas da última verificação de frota
+    try:
+        from app.bot.warm_pool import warm_pool
+
+        cached = warm_pool.get_plates_cache()
+        if cached:
+            if not plates:
+                plates = cached
+                source = "cache"
+            else:
+                # une memória + disco (memória pode ter acabado de listar)
+                seen = {p["placa"] for p in plates}
+                for p in cached:
+                    pl = (p.get("placa") or "").upper()
+                    if pl and pl not in seen:
+                        seen.add(pl)
+                        plates.append(p)
+                plates = sorted(plates, key=lambda x: x.get("placa") or "")
+                source = "disk+cache"
+    except Exception:
+        pass
+    # fallback: última verificação de frota
     if not plates:
         try:
             from app.bot.debug_session import get_verify
@@ -764,6 +799,12 @@ async def api_placas():
                     plates.append({"placa": pl, "display": "", "cliente": ""})
             if plates:
                 source = "verify"
+                try:
+                    from app.bot.plates_store import merge_plates
+
+                    merge_plates(plates)
+                except Exception:
+                    pass
         except Exception:
             pass
     return {
@@ -799,6 +840,44 @@ async def baixar_resumo():
         headers={
             "Content-Disposition": f'attachment; filename="{name}"',
             "Cache-Control": "no-store",
+        },
+    )
+
+
+@app.get("/ver-resumo", response_class=HTMLResponse)
+async def ver_resumo(request: Request):
+    """Página separada com o texto do resumo (não ocupa a home)."""
+    texto = _LAST_REPORT.get("texto")
+    has_pdf = bool(_LAST_REPORT.get("pdf_bytes"))
+    pdf_name = _LAST_REPORT.get("pdf_filename") or ""
+    placa = _LAST_REPORT.get("placa") or ""
+    if not texto and not has_pdf:
+        return RedirectResponse(url="/", status_code=303)
+    verify = []
+    try:
+        from app.bot.debug_session import get_verify
+
+        verify = [
+            {
+                "placa": v.placa,
+                "site_count": v.site_count,
+                "scrape_count": v.scrape_count,
+                "ok": v.ok,
+                "message": v.message,
+            }
+            for v in get_verify()
+        ]
+    except Exception:
+        pass
+    return templates.TemplateResponse(
+        request,
+        "resumo.html",
+        {
+            "texto": texto or "",
+            "has_pdf": has_pdf,
+            "pdf_name": pdf_name,
+            "placa": placa,
+            "verify": verify,
         },
     )
 
@@ -883,7 +962,7 @@ async def warm_status():
 
 @app.post("/warm/start")
 async def warm_start():
-    """Liga os 2 Chromes permanentes (em background — página atualiza sozinha)."""
+    """Liga Chrome 1 + Chrome 2 standby (em background)."""
     if not sitrax_configured():
         return RedirectResponse(url="/debug", status_code=303)
 
@@ -895,7 +974,7 @@ async def warm_start():
         except Exception as e:
             logger.exception("Warm start: %s", e)
 
-    # não espera os 2 terminarem — evita “travar” a tela em 1/2
+    # não espera os 2 terminarem — evita “travar” a tela
     executor.submit(job)
     return RedirectResponse(url="/debug", status_code=303)
 

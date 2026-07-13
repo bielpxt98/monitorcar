@@ -1,0 +1,91 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <meta name="theme-color" content="#0f1221" />
+  <title>Resumo{% if placa %} — {{ placa }}{% endif %}</title>
+  <style>
+    :root {
+      --bg: #0f1221; --card: #1a1f35; --text: #f3f4f6; --muted: #9ca3af;
+      --border: #2d3548; --accent: #ff6b00; --ok: #22c55e; --err: #ef4444;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0; font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+      background: var(--bg); color: var(--text);
+      padding: 1rem; line-height: 1.45; min-height: 100vh;
+    }
+    .wrap { max-width: 640px; margin: 0 auto; }
+    .nav { margin-bottom: 1rem; font-size: .9rem; display: flex; gap: .75rem; flex-wrap: wrap; align-items: center; }
+    a { color: #fb923c; text-decoration: none; }
+    a:hover { text-decoration: underline; }
+    h1 { font-size: 1.25rem; margin: 0 0 .35rem; }
+    .meta { color: var(--muted); font-size: .85rem; margin-bottom: 1rem; }
+    .card {
+      background: var(--card); border: 1px solid var(--border);
+      border-radius: 14px; padding: 1rem; margin-bottom: 1rem;
+    }
+    .actions { display: flex; gap: .5rem; flex-wrap: wrap; margin-bottom: 1rem; }
+    .btn {
+      display: inline-block; border: 0; border-radius: 10px; padding: .7rem 1rem;
+      font-weight: 700; color: #fff; text-decoration: none; font-size: .9rem;
+    }
+    .btn-pdf { background: linear-gradient(90deg, #7c3aed, #a855f7); }
+    .btn-back { background: #374151; }
+    pre.result {
+      white-space: pre-wrap; word-break: break-word;
+      background: #0b0e1a; border: 1px solid var(--border); border-radius: 12px;
+      padding: 1rem; font-size: .9rem; line-height: 1.5; margin: 0;
+    }
+    .verify-err {
+      margin-top: .85rem; padding: .85rem; border-radius: 12px;
+      border: 1px solid #f87171; background: rgba(248,113,113,.12);
+    }
+    .verify-err ul { margin: .4rem 0 0; padding-left: 1.1rem; color: #fecaca; font-size: .9rem; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="nav">
+      <a href="/">← Voltar</a>
+      · <a href="/debug">Debug</a>
+      · <a href="/logout">Sair</a>
+    </div>
+    <h1>Resumo de rota{% if placa %} — {{ placa }}{% endif %}</h1>
+    <p class="meta">Texto completo da última pesquisa. Baixe o PDF se precisar no celular.</p>
+
+    <div class="actions">
+      {% if has_pdf %}
+      <a class="btn btn-pdf" href="/baixar-resumo">⬇ Baixar PDF{% if pdf_name %} ({{ pdf_name }}){% endif %}</a>
+      {% endif %}
+      <a class="btn btn-back" href="/">Voltar à home</a>
+    </div>
+
+    {% set verify_errs = [] %}
+    {% if verify %}
+      {% for v in verify %}
+        {% if not v.ok %}{% if verify_errs.append(v) %}{% endif %}{% endif %}
+      {% endfor %}
+    {% endif %}
+    {% if verify_errs %}
+    <div class="card verify-err">
+      <strong style="color:#fca5a5">Verificação (site × pesquisa)</strong>
+      <ul>
+        {% for v in verify_errs %}
+        <li><strong>{{ v.placa }}</strong>: site {{ v.site_count }} · pesquisa {{ v.scrape_count }}</li>
+        {% endfor %}
+      </ul>
+    </div>
+    {% endif %}
+
+    <div class="card">
+      {% if texto %}
+      <pre class="result">{{ texto }}</pre>
+      {% else %}
+      <p class="meta">Sem texto de resumo. Use o PDF se disponível.</p>
+      {% endif %}
+    </div>
+  </div>
+</body>
+</html>

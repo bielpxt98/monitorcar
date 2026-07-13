@@ -18,146 +18,125 @@
       --border: #2d3548;
     }
     * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
-    html {
-      min-height: 100%;
-      background: var(--bg);
-    }
+    html { min-height: 100%; background: var(--bg); }
     body {
       margin: 0;
       font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
       color: var(--text);
       min-height: 100vh;
       min-height: 100dvh;
-      padding: 1rem;
-      padding-bottom: 2.5rem;
-      /* fundo sólido de fallback se a imagem falhar */
+      padding: .55rem .7rem 1rem;
       background-color: var(--bg);
-      /* NÃO use background-attachment:fixed — quebra no iOS/WhatsApp WebView */
       position: relative;
       isolation: isolate;
     }
-    /* Camada de fundo fixa (funciona em celular / iPhone / Chrome Android) */
     body::before {
       content: "";
-      position: fixed;
-      inset: 0;
-      z-index: -2;
+      position: fixed; inset: 0; z-index: -2;
       background-color: var(--bg);
       background-image: url("/static/bg-hero.jpg");
       background-size: cover;
       background-position: center 18%;
       background-repeat: no-repeat;
-      /* evita “pulo” no iOS ao rolar */
       -webkit-transform: translateZ(0);
       transform: translateZ(0);
     }
-    /* véu escuro por cima da foto — mais leve no topo p/ ver as pessoas */
     body::after {
       content: "";
-      position: fixed;
-      inset: 0;
-      z-index: -1;
+      position: fixed; inset: 0; z-index: -1;
       pointer-events: none;
       background: linear-gradient(
         180deg,
-        rgba(15, 18, 33, 0.45) 0%,
-        rgba(15, 18, 33, 0.62) 35%,
-        rgba(15, 18, 33, 0.82) 70%,
-        rgba(15, 18, 33, 0.92) 100%
+        rgba(15, 18, 33, 0.5) 0%,
+        rgba(15, 18, 33, 0.72) 45%,
+        rgba(15, 18, 33, 0.9) 100%
       );
     }
-    @media (max-width: 640px) {
-      body::before {
-        /* no celular mostra mais o rosto/meio da arte */
-        background-position: center 22%;
-        background-size: cover;
-      }
-      body::after {
-        background: linear-gradient(
-          180deg,
-          rgba(15, 18, 33, 0.38) 0%,
-          rgba(15, 18, 33, 0.55) 40%,
-          rgba(15, 18, 33, 0.78) 75%,
-          rgba(15, 18, 33, 0.90) 100%
-        );
-      }
-      .card {
-        background: rgba(26, 31, 53, 0.82);
-      }
+    .wrap { max-width: 440px; margin: 0 auto; position: relative; z-index: 1; }
+    header { margin-bottom: .55rem; }
+    h1 { margin: 0; font-size: 1.1rem; text-shadow: 0 2px 10px rgba(0,0,0,.45); }
+    header p {
+      margin: .2rem 0 0; color: var(--muted); font-size: .72rem;
+      line-height: 1.3; text-shadow: 0 1px 6px rgba(0,0,0,.4);
     }
-    .wrap { max-width: 480px; margin: 0 auto; position: relative; z-index: 1; }
-    header { margin-bottom: 1.25rem; }
-    h1 { margin: 0; font-size: 1.35rem; text-shadow: 0 2px 12px rgba(0,0,0,.45); }
-    header p { margin: .35rem 0 0; color: var(--muted); font-size: .9rem; line-height: 1.4; text-shadow: 0 1px 8px rgba(0,0,0,.4); }
     .card {
-      background: rgba(26, 31, 53, 0.88);
+      background: rgba(26, 31, 53, 0.9);
       border: 1px solid var(--border);
-      border-radius: 16px;
-      padding: 1.15rem;
-      margin-bottom: 1rem;
+      border-radius: 12px;
+      padding: .7rem .75rem;
+      margin-bottom: .5rem;
       backdrop-filter: blur(10px);
-      box-shadow: 0 8px 32px rgba(0,0,0,.35);
+      box-shadow: 0 6px 20px rgba(0,0,0,.3);
     }
-    .card h2 { margin: 0 0 .75rem; font-size: 1rem; }
+    .card h2 { margin: 0 0 .4rem; font-size: .92rem; }
     .badge {
-      display: inline-flex; align-items: center; gap: .35rem;
-      font-size: .75rem; padding: .2rem .6rem; border-radius: 999px; margin-bottom: .85rem;
+      display: inline-flex; align-items: center; gap: .25rem;
+      font-size: .68rem; padding: .12rem .45rem; border-radius: 999px;
+      margin-bottom: .4rem;
     }
     .badge.ok { background: rgba(34,197,94,.15); color: var(--ok); }
     .badge.muted { background: rgba(156,163,175,.12); color: var(--muted); }
-    label { display: block; font-size: .8rem; color: var(--muted); margin-bottom: .3rem; }
+    label { display: block; font-size: .72rem; color: var(--muted); margin-bottom: .15rem; }
     input[type=text], input[type=date], input[type=file] {
-      width: 100%; padding: .85rem .9rem; border-radius: 12px;
+      width: 100%; padding: .5rem .65rem; border-radius: 9px;
       border: 1px solid var(--border); background: #0f1324; color: var(--text);
-      font-size: 1rem; margin-bottom: .9rem;
+      font-size: .92rem; margin-bottom: .45rem;
     }
-    input[type=file] { padding: .65rem; }
-    button[type=submit], .btn-pdf {
-      width: 100%; border: 0; border-radius: 12px; padding: 1rem;
-      font-size: 1.05rem; font-weight: 700; color: #fff; cursor: pointer;
+    input[type=file] { padding: .4rem; font-size: .8rem; }
+    button[type=submit], .btn-pdf, .btn-view {
+      width: 100%; border: 0; border-radius: 10px; padding: .7rem;
+      font-size: .95rem; font-weight: 700; color: #fff; cursor: pointer;
+      text-align: center; text-decoration: none; display: block;
     }
-    /* Primário = laranja (automático) */
     button[type=submit].btn-primary {
       background: linear-gradient(90deg, var(--accent), #ff8c33);
-      box-shadow: 0 8px 24px rgba(255,107,0,.35);
+      box-shadow: 0 6px 16px rgba(255,107,0,.3);
     }
-    /* Secundário = roxo suave (fallback PDF) */
     button[type=submit].btn-secondary {
       background: linear-gradient(90deg, #6d28d9, var(--accent2));
-      box-shadow: 0 6px 18px rgba(168,85,247,.25);
+      box-shadow: 0 4px 12px rgba(168,85,247,.22);
     }
     button[type=submit]:disabled { opacity: .55; cursor: wait; }
+    .result-actions {
+      display: grid; grid-template-columns: 1fr 1fr; gap: .45rem;
+    }
+    .result-actions .btn-pdf,
+    .result-actions .btn-view { width: 100%; margin: 0; padding: .65rem .4rem; font-size: .85rem; }
     .btn-pdf {
-      display: block; text-align: center; text-decoration: none;
       background: linear-gradient(90deg, #7c3aed, var(--accent2));
-      margin-top: .75rem;
     }
-    .hint { font-size: .78rem; color: var(--muted); margin-top: .75rem; line-height: 1.45; }
-    pre.result {
-      white-space: pre-wrap; word-break: break-word;
-      background: #0b0e1a; border: 1px solid var(--border); border-radius: 12px;
-      padding: 1rem; font-size: .88rem; line-height: 1.5; max-height: 50vh; overflow: auto;
+    .btn-view {
+      background: linear-gradient(90deg, #0369a1, #0ea5e9);
+      box-shadow: 0 4px 12px rgba(14,165,233,.25);
     }
+    .hint { font-size: .68rem; color: var(--muted); margin-top: .35rem; line-height: 1.35; }
     pre.error {
       white-space: pre-wrap; color: #fecaca; background: rgba(239,68,68,.08);
-      border: 1px solid rgba(239,68,68,.35); border-radius: 12px; padding: .9rem;
-      font-size: .8rem; max-height: 30vh; overflow: auto;
+      border: 1px solid rgba(239,68,68,.35); border-radius: 10px; padding: .55rem;
+      font-size: .75rem; max-height: 12vh; overflow: auto; margin: 0;
     }
-    #loading { display: none; text-align: center; color: var(--muted); margin-top: .75rem; font-size: .9rem; }
-    .steps { font-size: .8rem; color: var(--muted); line-height: 1.5; }
-    .steps ol { padding-left: 1.15rem; margin: .4rem 0 0; }
     .label-row {
       display: flex; align-items: center; justify-content: space-between;
-      gap: .5rem; margin-bottom: .3rem;
+      gap: .4rem; margin-bottom: .15rem;
     }
     .label-row label { margin-bottom: 0; }
     .btn-info {
-      width: 1.55rem; height: 1.55rem; border-radius: 999px; border: 1px solid var(--border);
-      background: rgba(251,146,60,.15); color: #fdba74; font-size: .75rem; font-weight: 800;
+      width: 1.35rem; height: 1.35rem; border-radius: 999px; border: 1px solid var(--border);
+      background: rgba(251,146,60,.15); color: #fdba74; font-size: .7rem; font-weight: 800;
       font-style: italic; font-family: Georgia, serif; cursor: pointer; padding: 0;
       line-height: 1; flex-shrink: 0;
     }
     .btn-info:hover { background: rgba(255,107,0,.25); border-color: var(--accent); }
+    .mode-grid {
+      display: grid; grid-template-columns: 1fr 1fr; gap: .4rem; margin-bottom: .45rem;
+    }
+    .mode-grid label {
+      display: block; border: 1px solid var(--border); border-radius: 10px;
+      padding: .45rem .5rem; cursor: pointer; margin: 0;
+    }
+    .mode-grid strong { font-size: .82rem; color: var(--text); }
+    .mode-grid span { display: block; font-size: .65rem; color: var(--muted); margin-top: .1rem; }
+    .dates { display: grid; grid-template-columns: 1fr 1fr; gap: .4rem; }
     .plate-modal {
       display: none; position: fixed; inset: 0; z-index: 50;
       background: rgba(0,0,0,.55); align-items: flex-end; justify-content: center;
@@ -165,45 +144,51 @@
     }
     .plate-modal.open { display: flex; }
     .plate-sheet {
-      width: 100%; max-width: 480px; max-height: 70vh; overflow: auto;
-      background: #1a1f35; border: 1px solid var(--border); border-radius: 16px 16px 12px 12px;
-      padding: 1rem; box-shadow: 0 -8px 40px rgba(0,0,0,.45);
+      width: 100%; max-width: 440px; max-height: 70vh; overflow: auto;
+      background: #1a1f35; border: 1px solid var(--border); border-radius: 14px 14px 10px 10px;
+      padding: .85rem; box-shadow: 0 -8px 40px rgba(0,0,0,.45);
     }
-    .plate-sheet h3 { margin: 0 0 .35rem; font-size: 1rem; }
-    .plate-sheet .hint { margin: 0 0 .75rem; }
-    .plate-list { display: flex; flex-wrap: wrap; gap: .45rem; }
+    .plate-sheet h3 { margin: 0 0 .25rem; font-size: .95rem; }
+    .plate-list { display: flex; flex-wrap: wrap; gap: .35rem; }
     .plate-chip {
       border: 1px solid var(--border); background: #0f1324; color: var(--text);
-      border-radius: 999px; padding: .45rem .75rem; font-size: .85rem; font-weight: 700;
+      border-radius: 999px; padding: .4rem .65rem; font-size: .8rem; font-weight: 700;
       cursor: pointer; letter-spacing: .02em;
     }
     .plate-chip:hover, .plate-chip:focus {
       border-color: var(--accent); background: rgba(255,107,0,.12); color: #fdba74;
     }
-    .plate-sheet .close-row { margin-top: .9rem; }
     .plate-sheet .btn-close {
-      width: 100%; border: 0; border-radius: 12px; padding: .75rem;
+      width: 100%; border: 0; border-radius: 10px; padding: .65rem; margin-top: .7rem;
       background: #374151; color: #fff; font-weight: 600; cursor: pointer;
     }
     .header-row {
-      display: flex; align-items: flex-start; justify-content: space-between;
-      gap: .75rem;
+      display: flex; align-items: flex-start; justify-content: space-between; gap: .5rem;
     }
     .btn-logout, .btn-cancel {
-      border: 1px solid var(--border); border-radius: 10px;
+      border: 1px solid var(--border); border-radius: 8px;
       background: rgba(55,65,81,.55); color: var(--text);
-      font-size: .8rem; font-weight: 600; padding: .45rem .7rem;
+      font-size: .75rem; font-weight: 600; padding: .35rem .55rem;
       cursor: pointer; text-decoration: none; white-space: nowrap;
-      display: inline-flex; align-items: center; gap: .3rem;
+      display: inline-flex; align-items: center; gap: .25rem;
     }
-    .btn-logout:hover { border-color: #9ca3af; }
     .btn-cancel {
-      width: 100%; margin-top: .85rem; padding: .85rem;
-      border: 0; border-radius: 12px; font-size: 1rem; font-weight: 700;
+      width: 100%; margin-top: .5rem; padding: .65rem;
+      border: 0; border-radius: 10px; font-size: .9rem; font-weight: 700;
       background: linear-gradient(90deg, #b91c1c, #ef4444);
-      color: #fff; box-shadow: 0 6px 18px rgba(239,68,68,.28);
+      color: #fff; box-shadow: 0 4px 12px rgba(239,68,68,.25);
     }
     .btn-cancel:disabled { opacity: .55; cursor: wait; }
+    /* desktop alto: cabe mais sem scroll */
+    @media (min-height: 720px) {
+      body { padding-top: .75rem; }
+      .card { padding: .8rem .85rem; margin-bottom: .55rem; }
+    }
+    @media (max-height: 700px) {
+      header p { display: none; }
+      .hint-long { display: none; }
+      .card h2 { font-size: .88rem; }
+    }
   </style>
 </head>
 <body>
@@ -212,184 +197,128 @@
       <div class="header-row">
         <div>
           <h1>Resumo de Rota</h1>
-          <p>Prioridade: o servidor busca no Sitrax <strong>sozinho</strong> e devolve 1 PDF de resumo. Upload de PDF fica só como plano B.</p>
+          <p>Sitrax automático → 1 PDF de resumo. Upload = plano B.</p>
         </div>
         <a class="btn-logout" href="/logout" title="Sair">🔒 Sair</a>
       </div>
     </header>
 
     {% if job_running or job_msg or job_status %}
-    <div class="card" id="job-box" style="border-color:#ff6b00">
-      <div class="badge ok">● Processando no servidor</div>
-      <p class="hint" style="margin:0;color:#fde68a;font-size:.9rem">
+    <div class="card" id="job-box" style="border-color:#ff6b00;padding:.55rem .7rem">
+      <div class="badge ok">● Processando</div>
+      <p class="hint" style="margin:0;color:#fde68a;font-size:.8rem">
         {% if job_msg %}{{ job_msg }}{% else %}{{ job_status }}{% endif %}
       </p>
-      <p class="hint" id="job-live" style="margin:.5rem 0 0">{{ job_status }}</p>
-      <p class="hint" style="margin:.65rem 0 0">
-        Pesquisa em segundo plano (evita “upstream error”).
-        Acompanhe em <a href="/debug" style="color:#fdba74">/debug</a>.
-        Esta página atualiza sozinha.
-      </p>
+      <p class="hint" id="job-live" style="margin:.25rem 0 0">{{ job_status }}</p>
       {% if job_running %}
       <form method="post" action="/cancelar" id="form-cancel"
             onsubmit="var b=this.querySelector('button'); b.disabled=true; b.textContent='Cancelando…';">
-        <button type="submit" class="btn-cancel" id="btn-cancel">
-          ⏹ Cancelar pesquisa
-        </button>
+        <button type="submit" class="btn-cancel" id="btn-cancel">⏹ Cancelar</button>
       </form>
-      <p class="hint" style="margin:.5rem 0 0">
-        Cancela na hora e libera para buscar outra placa.
-      </p>
       {% endif %}
     </div>
     {% endif %}
 
-    <!-- 1) PRIORIDADE: AUTOMÁTICO -->
+    <!-- 1) AUTOMÁTICO -->
     <div class="card">
-      <div class="badge ok">● Prioridade — automático</div>
-      <h2>1. Buscar no Sitrax sozinho</h2>
-      <p class="hint" style="margin-top:0;margin-bottom:.9rem">
-        O servidor entra no Sitrax, escolhe a placa, baixa o histórico, monta o resumo e apaga os arquivos brutos.
-      </p>
+      <div class="badge ok">● Automático</div>
+      <h2>1. Buscar no Sitrax</h2>
       <form method="post" action="/gerar" id="form-auto">
-        <div style="display:grid;grid-template-columns:1fr 1fr;gap:.65rem;margin-bottom:.9rem">
-          <label class="mode" style="display:block;border:1px solid var(--border);border-radius:12px;padding:.75rem;cursor:pointer">
+        <div class="mode-grid">
+          <label class="mode">
             <input type="radio" name="modo" value="placa" {% if not modo or modo == 'placa' %}checked{% endif %} />
             <strong>1 veículo</strong>
-            <span style="display:block;font-size:.72rem;color:var(--muted);margin-top:.25rem">Só a placa abaixo</span>
+            <span>Só a placa abaixo</span>
           </label>
-          <label class="mode" style="display:block;border:1px solid var(--border);border-radius:12px;padding:.75rem;cursor:pointer">
+          <label class="mode">
             <input type="radio" name="modo" value="todos" {% if modo == 'todos' %}checked{% endif %} />
-            <strong>Todos (1 a 1)</strong>
-            <span style="display:block;font-size:.72rem;color:var(--muted);margin-top:.25rem">Cada carro separado</span>
+            <strong>Todos</strong>
+            <span>Chrome 1 + standby</span>
           </label>
         </div>
 
         <div class="label-row">
-          <label for="placa">Placa (obrigatória em <strong>1 veículo</strong>; ignore em Todos)</label>
-          <button type="button" class="btn-info" id="btn-plates-info" title="Listar placas da frota" aria-label="Listar placas">i</button>
+          <label for="placa">Placa (1 veículo) — toque no <em>i</em> p/ lista salva</label>
+          <button type="button" class="btn-info" id="btn-plates-info" title="Placas salvas da frota" aria-label="Listar placas">i</button>
         </div>
         <input id="placa" name="placa" type="text" placeholder="Ex: PCE7B03"
                value="{{ placa or '' }}" style="text-transform:uppercase"
                autocomplete="off" />
 
-        <div style="display:grid;grid-template-columns:1fr 1fr;gap:.65rem">
+        <div class="dates">
           <div>
-            <label for="data_ini">Data início</label>
+            <label for="data_ini">Início</label>
             <input id="data_ini" name="data_ini" type="date" value="{{ data_ini or today }}" />
           </div>
           <div>
-            <label for="data_fim">Data fim</label>
+            <label for="data_fim">Fim</label>
             <input id="data_fim" name="data_fim" type="date" value="{{ data_fim or today }}" />
           </div>
         </div>
-        <button type="submit" class="btn-primary" id="btn-auto">Gerar resumo automático</button>
-        <p class="hint">
-          <strong>Todos</strong> usa <strong>1 Chrome permanente</strong> (estável, mais pontos completos):<br/>
-          Todas as placas em sequência · entre carros: X do chip → próxima placa.<br/>
-          <strong>Só reinicia se a aba travar</strong> (não a cada N carros). Pode levar ~15–20 min.<br/>
-          Roda em <strong>segundo plano</strong> — acompanhe em /debug e baixe o PDF na home.
+        <button type="submit" class="btn-primary" id="btn-auto">Gerar resumo</button>
+        <p class="hint hint-long">
+          Todos: Chrome 1 em sequência; Chrome 2 standby só se o 1 cair.
+          <a href="/debug" style="color:#fb923c">/debug</a>
         </p>
       </form>
-      <p class="hint">
-        <a href="/debug" style="color:#fb923c">Painel de calibração →</a>
-        — robô permanente em Veículos (testes de placa mais rápidos) + fotos se der erro.
-      </p>
     </div>
 
-    <!-- 2) FALLBACK: PDF -->
+    <!-- 2) PLANO B -->
     <div class="card">
-      <div class="badge muted">○ Plano B — se o automático falhar</div>
+      <div class="badge muted">○ Plano B</div>
       <h2>2. Enviar PDF do Sitrax</h2>
-      <p class="hint" style="margin-top:0;margin-bottom:.9rem">
-        No Sitrax: Posições → veículo → Filtrar → nuvem de download. Depois envie o PDF aqui.
-      </p>
       <form method="post" action="/gerar-pdf" enctype="multipart/form-data" id="form-pdf">
-        <label for="pdf">Arquivo PDF (HistoricoPosicoes…)</label>
         <input id="pdf" name="pdf" type="file" accept="application/pdf,.pdf" required />
-
-        <label for="placa_pdf">Placa (opcional)</label>
-        <input id="placa_pdf" name="placa" type="text" placeholder="Ex: PCE7B03" style="text-transform:uppercase" />
-
-        <label for="data_pdf">Data do relatório</label>
-        <input id="data_pdf" name="data" type="date" value="{{ today }}" />
-
-        <button type="submit" class="btn-secondary" id="btn-pdf">Gerar resumo deste PDF</button>
-        <p class="hint">
-          O PDF bruto fica só no servidor por segundos e é <strong>apagado</strong> depois do resumo.
-        </p>
+        <div class="dates">
+          <div>
+            <label for="placa_pdf">Placa (opc.)</label>
+            <input id="placa_pdf" name="placa" type="text" placeholder="PCE7B03" style="text-transform:uppercase" />
+          </div>
+          <div>
+            <label for="data_pdf">Data</label>
+            <input id="data_pdf" name="data" type="date" value="{{ today }}" />
+          </div>
+        </div>
+        <button type="submit" class="btn-secondary" id="btn-pdf">Gerar deste PDF</button>
       </form>
     </div>
-
-    <div id="loading">⏳ Processando… não feche esta tela (pode levar alguns minutos).</div>
 
     {% if error %}
-    <div class="card">
-      <h2>Erro no automático</h2>
+    <div class="card" style="padding:.55rem .7rem">
+      <h2 style="margin:0 0 .35rem;font-size:.85rem;color:#fca5a5">Erro</h2>
       <pre class="error">{{ error }}</pre>
-      <p class="hint">Se o automático falhar, use o <strong>Plano B</strong> (enviar PDF) ou abra o <a href="/debug" style="color:#fb923c">painel de calibração</a>.</p>
     </div>
     {% endif %}
 
+    <!-- 3) RESULTADO compacto -->
     {% if texto or has_pdf %}
-    <div class="card">
-      <h2>Seu resumo</h2>
-      {% if has_pdf %}
-        <a class="btn-pdf" href="/baixar-resumo">⬇ Baixar PDF do resumo{% if pdf_name %} ({{ pdf_name }}){% endif %}</a>
-        <p class="hint">Único arquivo para o celular — não é o histórico completo do Sitrax.</p>
-      {% endif %}
-      {% set verify_errs = [] %}
-      {% if verify %}
-        {% for v in verify %}
-          {% if not v.ok %}{% if verify_errs.append(v) %}{% endif %}{% endif %}
-        {% endfor %}
-      {% endif %}
-      {% if verify_errs %}
-      <div style="margin-top:.9rem;padding:.85rem;border-radius:12px;border:1px solid #f87171;background:rgba(248,113,113,.12)">
-        <strong style="color:#fca5a5">Erro na verificação (site × pesquisa)</strong>
-        <p class="hint" style="margin:.35rem 0 .5rem;color:#fecaca">
-          Placas em que o site e a pesquisa não bateram. Tabela completa em
-          <a href="/debug" style="color:#fdba74">/debug</a>.
-        </p>
-        <ul style="margin:0;padding-left:1.1rem;font-size:.9rem;color:#fecaca">
-          {% for v in verify_errs %}
-          <li>
-            <strong>{{ v.placa }}</strong>:
-            site {{ v.site_count }} · pesquisa {{ v.scrape_count }}
-          </li>
-          {% endfor %}
-        </ul>
+    <div class="card" style="border-color:rgba(168,85,247,.45)">
+      <div class="badge ok">● Pronto{% if placa %} — {{ placa }}{% endif %}</div>
+      <h2>3. Seu resumo</h2>
+      <div class="result-actions">
+        {% if has_pdf %}
+        <a class="btn-pdf" href="/baixar-resumo">⬇ Baixar PDF</a>
+        {% else %}
+        <span class="hint" style="align-self:center">Sem PDF</span>
+        {% endif %}
+        {% if texto %}
+        <a class="btn-view" href="/ver-resumo" target="_blank" rel="noopener">👁 Visualizar</a>
+        {% else %}
+        <span></span>
+        {% endif %}
       </div>
-      {% endif %}
-      {% if texto %}
-        <pre class="result" style="margin-top:.85rem">{{ texto }}</pre>
-      {% endif %}
+      <p class="hint" style="margin:.35rem 0 0">Texto abre em outra página. PDF é o único arquivo no celular.</p>
     </div>
     {% endif %}
-
-    <div class="card steps">
-      <strong>Como funciona</strong>
-      <ol>
-        <li><strong>Automático (prioridade):</strong> placa + gerar — o servidor faz tudo</li>
-        <li><strong>Plano B:</strong> você baixa o PDF no Sitrax e envia aqui</li>
-        <li>Você recebe só o resumo (cidade / horário)</li>
-        <li>Arquivos brutos são apagados no servidor</li>
-      </ol>
-    </div>
-  </div>
-  <div id="loading" style="display:none;text-align:center;color:var(--muted);padding:1rem">
-    Processando no servidor… pode demorar. Não feche esta aba.
   </div>
 
-  <!-- Modal: escolher placa -->
+  <!-- Modal placas -->
   <div class="plate-modal" id="plate-modal" role="dialog" aria-modal="true" aria-labelledby="plate-modal-title">
     <div class="plate-sheet">
-      <h3 id="plate-modal-title">Placas da frota</h3>
-      <p class="hint" id="plate-modal-hint">Toque numa placa para preencher e pesquisar.</p>
+      <h3 id="plate-modal-title">Placas salvas</h3>
+      <p class="hint" id="plate-modal-hint" style="margin:0 0 .6rem">Toque numa placa para pesquisar.</p>
       <div class="plate-list" id="plate-list"></div>
-      <div class="close-row">
-        <button type="button" class="btn-close" id="plate-modal-close">Fechar</button>
-      </div>
+      <button type="button" class="btn-close" id="plate-modal-close">Fechar</button>
     </div>
   </div>
 
@@ -397,17 +326,14 @@
     function wire(formId, btnId, label) {
       const form = document.getElementById(formId);
       const btn = document.getElementById(btnId);
-      const loading = document.getElementById('loading');
       if (!form) return;
       form.addEventListener('submit', () => {
         if (btn) { btn.disabled = true; btn.textContent = label || 'Gerando…'; }
-        if (loading) loading.style.display = 'block';
       });
     }
     wire('form-auto', 'btn-auto', 'Gerando…');
     wire('form-pdf', 'btn-pdf', 'Gerando…');
 
-    // Botão (i): lista placas e permite clicar para pesquisar
     (function platePicker() {
       const btn = document.getElementById('btn-plates-info');
       const modal = document.getElementById('plate-modal');
@@ -431,17 +357,15 @@
           placaInput.value = pl;
           placaInput.dispatchEvent(new Event('input', { bubbles: true }));
         }
-        // modo 1 veículo
         const radio = form && form.querySelector('input[name=modo][value=placa]');
         if (radio) radio.checked = true;
         closeModal();
-        // envia pesquisa
         if (form) form.requestSubmit ? form.requestSubmit() : form.submit();
       }
 
       btn.addEventListener('click', async () => {
         list.innerHTML = '<span class="hint">Carregando…</span>';
-        hint.textContent = 'Toque numa placa para preencher e pesquisar.';
+        hint.textContent = 'Toque numa placa para pesquisar.';
         openModal();
         try {
           const r = await fetch('/api/placas', { cache: 'no-store' });
@@ -449,10 +373,10 @@
           const plates = j.plates || [];
           list.innerHTML = '';
           if (!plates.length) {
-            hint.textContent = 'Nenhuma placa em cache. Rode “Todos” uma vez (ou aguarde o robô listar a frota) e abra de novo.';
+            hint.textContent = 'Nenhuma placa salva ainda. Rode “Todos” uma vez ou pesquise 1 placa — o sistema grava no (i).';
             return;
           }
-          hint.textContent = plates.length + ' placa(s) · toque para pesquisar (1 veículo).';
+          hint.textContent = plates.length + ' placa(s) salvas · toque para pesquisar.';
           plates.forEach((p) => {
             const pl = (p.placa || '').toUpperCase();
             if (!pl) return;
@@ -471,7 +395,6 @@
       });
     })();
 
-    // Frota em background: atualiza status e recarrega quando terminar
     (function pollJob() {
       const box = document.getElementById('job-box');
       const live = document.getElementById('job-live');

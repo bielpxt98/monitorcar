@@ -1,8 +1,9 @@
 """
 Pool de Chromes permanentes no Sitrax.
 
-- 1 navegador logado, parado em Posições/Veículos (estável no Railway).
-- 1 placa e Todos: mesmo Chrome; entre placas X → próxima.
+- Chrome 1: principal (1 placa e Todos).
+- Chrome 2: standby em Veículos — só entra no Todos se o 1 cair.
+- Entre placas: X no chip → próxima (sem login).
 - Só reabre se a aba travar (tab crashed).
 """
 
@@ -19,8 +20,8 @@ from typing import Any, Optional
 
 logger = logging.getLogger(__name__)
 
-# 1 Chrome = menos tab crashed e menos placas perdidas (pontos completos)
-PERMANENT_SLOTS = 1
+# 2 Chromes: 1 ativo + 1 standby (failover no Todos)
+PERMANENT_SLOTS = 2
 _LOGIN_LOCK = threading.Lock()
 
 
@@ -61,6 +62,18 @@ class WarmPool:
         self._fleet_busy = False  # True enquanto Todos usa os Chromes
         # cache de placas (para UI escolher placa sem abrir Chrome de novo)
         self._plates_cache: list[dict] = []
+        # carrega placas salvas no disco (botão i)
+        try:
+            from app.bot.plates_store import load_plates
+
+            saved = load_plates()
+            if saved:
+                self._plates_cache = list(saved)
+                logger.info(
+                    "WarmPool: %s placa(s) carregadas do disco", len(saved)
+                )
+        except Exception as e:
+            logger.warning("WarmPool load plates: %s", e)
 
     # ——— status ———
 
@@ -99,7 +112,8 @@ class WarmPool:
             if ready_n == len(self._slots):
                 status, msg = (
                     "ready",
-                    f"{ready_n}/{len(self._slots)} Chromes prontos em Veículos",
+                    f"{ready_n}/{len(self._slots)} Chromes em Veículos "
+                    f"(1 ativo + {max(0, ready_n - 1)} standby)",
                 )
             elif starting_n and ready_n:
                 status, msg = (
@@ -129,6 +143,8 @@ class WarmPool:
                 "ready": ready_n >= 1,
                 "ready_count": ready_n,
                 "slot_count": len(self._slots),
+                "standby_ready": ready_n >= 2,
+                "plates_cached": len(self._plates_cache),
                 "slots": slots_info,
             }
 
@@ -177,13 +193,14 @@ class WarmPool:
         self._keeper_stop.set()
 
     def ensure_both(self, headless: bool = True, low_memory: bool = True) -> dict:
-        """Garante todos os slots permanentes (hoje: 1)."""
+        """Garante Chrome 1 (ativo) + Chrome 2 (standby) em Veículos."""
         for i in range(len(self._slots)):
             try:
                 self._ensure_slot(i, headless=headless, low_memory=low_memory)
             except Exception as e:
                 logger.exception("Falha ao aquecer slot %s: %s", i + 1, e)
                 self.last_error = str(e)
+                # Chrome 2 é standby: falha nele não impede o 1
                 if i + 1 < len(self._slots):
                     time.sleep(3.0)
 
@@ -253,12 +270,14 @@ class WarmPool:
             slot.tmp = tmp
             slot.status = "ready"
             slot.starting_since = 0.0
+            role = "ativo" if slot.slot_id == 0 else "standby"
             slot.message = (
-                f"Chrome {slot.slot_id + 1}: PRONTO em Posições ({_elapsed()})"
+                f"Chrome {slot.slot_id + 1}: PRONTO em Posições "
+                f"({role}, {_elapsed()})"
             )
             debug_session.step(
                 f"warm{slot.slot_id + 1}_pronto",
-                f"Chrome permanente {slot.slot_id + 1} em Posições "
+                f"Chrome permanente {slot.slot_id + 1} ({role}) em Posições "
                 f"(aquecendo em {_elapsed()})",
                 ok=True,
                 screenshot=False,
@@ -612,8 +631,9 @@ class WarmPool:
 
     def borrow_for_fleet(self) -> list[tuple[int, Any]]:
         """
-        Garante 2 Chromes e marca busy.
-        Retorna [(worker_id, bot), ...] para o fleet_workers.
+        Garante Chrome 1 (ativo) + Chrome 2 (standby) e marca busy.
+        Frota processa só no 1; o 2 fica standby até o 1 cair.
+        Retorna [(worker_id, bot), ...] — id 0 = ativo, id 1 = standby.
         """
         self._fleet_busy = True
         self.ensure_both()
@@ -626,28 +646,43 @@ class WarmPool:
                             self._boot_slot_unlocked(slot)
                         except Exception:
                             continue
+                    if slot.bot is None:
+                        continue
                     slot.status = "busy"
-                    slot.message = f"Chrome {slot.slot_id + 1}: frota…"
+                    if slot.slot_id == 0:
+                        slot.message = f"Chrome {slot.slot_id + 1}: frota (ativo)…"
+                    else:
+                        slot.message = (
+                            f"Chrome {slot.slot_id + 1}: frota (standby)…"
+                        )
                     out.append((slot.slot_id, slot.bot))
         return out
 
     def replace_fleet_bot(self, worker_id: int, bot: Any) -> None:
-        """Atualiza o bot do slot após crash/restart na frota."""
+        """
+        Atualiza o bot do slot após crash/restart na frota.
+        Se o bot vinha do standby (slot 1), limpa o slot 1 para não
+        devolver o mesmo browser duas vezes.
+        """
         if worker_id < 0 or worker_id >= len(self._slots):
             return
-        slot = self._slots[worker_id]
-        with slot.lock:
-            # não fecha o bot antigo se for o mesmo
-            if slot.bot is not bot and slot.bot is not None:
-                try:
-                    if slot.bot is not bot:
-                        # old already closed by fleet worker
-                        pass
-                except Exception:
-                    pass
-            slot.bot = bot
-            slot.status = "busy"
-            slot.message = f"Chrome {slot.slot_id + 1}: frota (reiniciado)"
+        with self._lock:
+            # se este bot era o do standby, libera o slot antigo
+            for s in self._slots:
+                if s.slot_id == worker_id:
+                    continue
+                with s.lock:
+                    if s.bot is bot:
+                        s.bot = None
+                        s.status = "error"
+                        s.message = (
+                            f"Chrome {s.slot_id + 1}: promovido ao ativo"
+                        )
+            slot = self._slots[worker_id]
+            with slot.lock:
+                slot.bot = bot
+                slot.status = "busy"
+                slot.message = f"Chrome {slot.slot_id + 1}: frota (ativo)"
 
     def release_after_fleet(self) -> dict:
         """Devolve os 2 a Veículos (permanentes continuam ligados)."""
@@ -702,6 +737,7 @@ class WarmPool:
         return vehicles
 
     def set_plates_cache(self, vehicles: list[dict]) -> None:
+        """Atualiza cache em memória e persiste no disco (merge)."""
         clean = []
         seen = set()
         for v in vehicles or []:
@@ -718,10 +754,57 @@ class WarmPool:
                     "cliente": (v.get("cliente") or "").strip(),
                 }
             )
+        # merge com o que já estava (não perde placas antigas)
+        try:
+            from app.bot.plates_store import merge_plates, load_plates
+
+            if clean:
+                merge_plates(clean)
+            merged = load_plates()
+            if merged:
+                clean = merged
+            elif not clean:
+                clean = load_plates()
+        except Exception as e:
+            logger.warning("set_plates_cache persist: %s", e)
+            with self._lock:
+                # une com cache atual se disco falhar
+                for old in self._plates_cache:
+                    pl = (old.get("placa") or "").upper()
+                    if pl and pl not in seen:
+                        seen.add(pl)
+                        clean.append(old)
+                clean = sorted(clean, key=lambda x: x.get("placa") or "")
+
         with self._lock:
             self._plates_cache = clean
 
+    def remember_plate(self, placa: str) -> None:
+        """Salva 1 placa pesquisada (digitada ou escolhida no i)."""
+        try:
+            from app.bot.plates_store import remember_plate, load_plates
+
+            remember_plate(placa)
+            with self._lock:
+                self._plates_cache = load_plates()
+        except Exception as e:
+            logger.warning("remember_plate: %s", e)
+
     def get_plates_cache(self) -> list[dict]:
+        with self._lock:
+            if self._plates_cache:
+                return list(self._plates_cache)
+        # fallback disco
+        try:
+            from app.bot.plates_store import load_plates
+
+            saved = load_plates()
+            if saved:
+                with self._lock:
+                    self._plates_cache = list(saved)
+                return list(saved)
+        except Exception:
+            pass
         with self._lock:
             return list(self._plates_cache)
 

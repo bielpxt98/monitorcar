@@ -14,4 +14,6 @@ relatorio*.pdf
 debug/
 .DS_Store
 *.crdownload
+# placas salvas no runtime (deploy); se quiser versionar, remova esta linha
+# data/plates.json
 
